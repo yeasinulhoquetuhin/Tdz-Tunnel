@@ -1,22 +1,10 @@
-#!/usr/bin/env bash
-# Tdz Tunnel - Full Installer (Xray) with enhanced dashboard
-# Developer: Yeasinul Hoque Tuhin
-# Website: tuhinbro.website
-# Features:
-#  - Installs Xray-core
-#  - Generates config supporting VLESS (WS+TLS, WS+NTLS, gRPC), VMess (WS+TLS, WS+NTLS), Trojan (TCP, gRPC)
-#  - Default WS path: /@TuhinBroh or /tdz-vmess
-#  - Systemd service: /etc/systemd/system/xray.service
-#  - Obtains TLS certs using certbot (Let's Encrypt)
-#  - Management CLI: /usr/local/bin/tdz (enhanced menu-driven dashboard)
-#  - Users stored in /etc/tdz/users.json
-#  - Bandwidth monitoring and server info
-#
-# IMPORTANT: Run this script as root on Debian/Ubuntu-based systems.
-#            Backup any existing Xray configs before running.
+#!/bin/bash
 
-set -euo pipefail
-export DEBIAN_FRONTEND=noninteractive
+# ==================================================
+# Tdz Tunnel - Ultimate VPN Solution
+# Developer: Yeasinul Hoque Tuhin
+# Contact: tuhinbro.website
+# ==================================================
 
 # Colors
 RED='\033[0;31m'
@@ -27,14 +15,848 @@ CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
 NC='\033[0m'
 
-# Logging functions
-log_info() { echo -e "${BLUE}[INFO]${NC} $*"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
-log_success() { echo -e "${GREEN}[SUCCESS]${NC} $*"; }
+# Log functions
+log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
+log_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 # Check root
-require_root() { [ "$(id -u)" -eq 0 ] || log_error "This script must be run as root"; }
-require_root
+if [[ $EUID -ne 0 ]]; then
+    log_error "Root access required! Use: ${CYAN}sudo ./install.sh${NC}"
+    exit 1
+fi
+
+# Banner
+echo -e "${GREEN}"
+echo "=================================================="
+echo "            Tdz Tunnel Auto Installer"
+echo "           Developer: Yeasinul Hoque Tuhin"
+echo "=================================================="
+echo -e "${NC}"
+
+# Update system
+log_info "Updating system packages..."
+apt update && apt upgrade -y
+apt install -y curl wget sudo git unzip jq certbot python3-certbot-nginx bc
+
+# Get domain from user
+read -p "Enter your domain name: " DOMAIN
+if [ -z "$DOMAIN" ]; then
+    log_error "Domain name is required!"
+    exit 1
+fi
+
+# Verify domain
+log_info "Verifying domain: ${CYAN}$DOMAIN${NC}"
+if ! ping -c 1 $DOMAIN &> /dev/null; then
+    log_error "Domain not reachable! Please configure DNS first."
+    exit 1
+fi
+
+# Get server location and ISP info
+get_server_info() {
+    IP=$(curl -s ifconfig.me)
+    LOCATION=$(curl -s ipinfo.io/$IP | jq -r '.country + ", " + .city')
+    ISP=$(curl -s ipinfo.io/$IP | jq -r '.org' | cut -d' ' -f2-)
+    echo "$LOCATION" > /root/tdz-server-location.txt
+    echo "$ISP" > /root/tdz-server-isp.txt
+}
+
+get_server_info
+
+# Install Xray
+log_info "Installing Xray..."
+bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+
+# Generate SSL certificate
+log_info "Generating SSL certificate for ${CYAN}$DOMAIN${NC}"
+certbot certonly --standalone --agree-tos --non-interactive --email admin@$DOMAIN -d $DOMAIN
+
+# Generate UUIDs
+UUID_VLESS=$(cat /proc/sys/kernel/random/uuid)
+UUID_VMESS=$(cat /proc/sys/kernel/random/uuid)
+UUID_TROJAN=$(cat /proc/sys/kernel/random/uuid)
+
+# Create Xray config with ALL protocols
+log_info "Creating Xray configuration..."
+cat > /usr/local/etc/xray/config.json << EOF
+{
+    "inbounds": [
+        {
+            "port": 443,
+            "protocol": "vless",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "$UUID_VLESS",
+                        "flow": "xtls-rprx-vision",
+                        "email": "vless-tls@$DOMAIN"
+                    }
+                ],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "tls",
+                "tlsSettings": {
+                    "certificates": [
+                        {
+                            "certificateFile": "/etc/letsencrypt/live/$DOMAIN/fullchain.pem",
+                            "keyFile": "/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+                        }
+                    ],
+                    "alpn": ["h2", "http/1.1"]
+                }
+            },
+            "sniffing": {
+                "enabled": true,
+                "destOverride": ["http", "tls"]
+            }
+        },
+        {
+            "port": 80,
+            "protocol": "vless",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "$UUID_VLESS",
+                        "email": "vless-ntls@$DOMAIN"
+                    }
+                ],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "ws",
+                "wsSettings": {
+                    "path": "/TuhinDroidZone",
+                    "headers": {
+                        "Host": "$DOMAIN"
+                    }
+                },
+                "security": "none"
+            },
+            "sniffing": {
+                "enabled": true,
+                "destOverride": ["http", "tls"
+            }
+        },
+        {
+            "port": 8443,
+            "protocol": "vmess",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "$UUID_VMESS",
+                        "alterId": 0,
+                        "email": "vmess-tls@$DOMAIN"
+                    }
+                ]
+            },
+            "streamSettings": {
+                "network": "ws",
+                "wsSettings": {
+                    "path": "/TuhinDroidZone",
+                    "headers": {
+                        "Host": "$DOMAIN"
+                    }
+                },
+                "security": "tls",
+                "tlsSettings": {
+                    "certificates": [
+                        {
+                            "certificateFile": "/etc/letsencrypt/live/$DOMAIN/fullchain.pem",
+                            "keyFile": "/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "port": 8080,
+            "protocol": "vmess",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "$UUID_VMESS",
+                        "alterId": 0,
+                        "email": "vmess-ntls@$DOMAIN"
+                    }
+                ]
+            },
+            "streamSettings": {
+                "network": "ws",
+                "wsSettings": {
+                    "path": "/TuhinDroidZone",
+                    "headers": {
+                        "Host": "$DOMAIN"
+                    }
+                },
+                "security": "none"
+            }
+        },
+        {
+            "port": 2095,
+            "protocol": "trojan",
+            "settings": {
+                "clients": [
+                    {
+                        "password": "$UUID_TROJAN",
+                        "email": "trojan-tls@$DOMAIN"
+                    }
+                ]
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "tls",
+                "tlsSettings": {
+                    "certificates": [
+                        {
+                            "certificateFile": "/etc/letsencrypt/live/$DOMAIN/fullchain.pem",
+                            "keyFile": "/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "port": 2096,
+            "protocol": "trojan",
+            "settings": {
+                "clients": [
+                    {
+                        "password": "$UUID_TROJAN",
+                        "email": "trojan-grpc@$DOMAIN"
+                    }
+                ]
+            },
+            "streamSettings": {
+                "network": "grpc",
+                "grpcSettings": {
+                    "serviceName": "Tuhin-Internet-Service"
+                },
+                "security": "tls",
+                "tlsSettings": {
+                    "certificates": [
+                        {
+                            "certificateFile": "/etc/letsencrypt/live/$DOMAIN/fullchain.pem",
+                            "keyFile": "/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+                        }
+                    ]
+                }
+            }
+        }
+    ],
+    "outbounds": [
+        {
+            "protocol": "freedom",
+            "tag": "direct"
+        },
+        {
+            "protocol": "blackhole",
+            "tag": "blocked"
+        }
+    ]
+}
+EOF
+
+# Restart Xray
+systemctl restart xray
+systemctl enable xray
+
+# Configure firewall
+log_info "Configuring firewall..."
+ufw allow 80/tcp
+ufw allow 443/tcp
+ufw allow 8443/tcp
+ufw allow 8080/tcp
+ufw allow 2095/tcp
+ufw allow 2096/tcp
+ufw --force enable
+
+# Create user management system
+mkdir -p /etc/tdz
+cat > /etc/tdz/user-manager.sh << 'EOF'
+#!/bin/bash
+
+USER_DB="/etc/tdz/users.json"
+
+initialize_db() {
+    if [ ! -f "$USER_DB" ]; then
+        echo '{"users": []}' > "$USER_DB"
+    fi
+}
+
+create_user() {
+    local protocol=$1
+    local remark=$2
+    local expiry_days=$3
+    
+    case $protocol in
+        "vless")
+            uuid=$(cat /proc/sys/kernel/random/uuid)
+            expiry_date=$(date -d "+$expiry_days days" +"%d/%m/%Y")
+            jq ".users += [{\"protocol\": \"vless\", \"uuid\": \"$uuid\", \"remark\": \"$remark\", \"expiry_date\": \"$expiry_date\", \"created\": \"$(date)\"}]" "$USER_DB" > /tmp/tdz_temp.json && mv /tmp/tdz_temp.json "$USER_DB"
+            echo "$uuid"
+            ;;
+        "vmess")
+            uuid=$(cat /proc/sys/kernel/random/uuid)
+            expiry_date=$(date -d "+$expiry_days days" +"%d/%m/%Y")
+            jq ".users += [{\"protocol\": \"vmess\", \"uuid\": \"$uuid\", \"remark\": \"$remark\", \"expiry_date\": \"$expiry_date\", \"created\": \"$(date)\"}]" "$USER_DB" > /tmp/tdz_temp.json && mv /tmp/tdz_temp.json "$USER_DB"
+            echo "$uuid"
+            ;;
+        "trojan")
+            password=$(cat /proc/sys/kernel/random/uuid | cut -d'-' -f1)
+            expiry_date=$(date -d "+$expiry_days days" +"%d/%m/%Y")
+            jq ".users += [{\"protocol\": \"trojan\", \"password\": \"$password\", \"remark\": \"$remark\", \"expiry_date\": \"$expiry_date\", \"created\": \"$(date)\"}]" "$USER_DB" > /tmp/tdz_temp.json && mv /tmp/tdz_temp.json "$USER_DB"
+            echo "$password"
+            ;;
+    esac
+}
+
+list_users() {
+    jq -r '.users[] | "\(.protocol) - \(.remark) - Expiry: \(.expiry_date)"' "$USER_DB"
+}
+
+get_user_info() {
+    local protocol=$1
+    local remark=$2
+    jq -r ".users[] | select(.protocol == \"$protocol\" and .remark == \"$remark\")" "$USER_DB"
+}
+EOF
+
+chmod +x /etc/tdz/user-manager.sh
+
+# Create advanced control script with interactive dashboard
+cat > /usr/local/bin/tdz << 'EOF'
+#!/bin/bash
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+NC='\033[0m'
+
+CONFIG_FILE="/root/tdz-config.txt"
+SERVER_LOCATION=$(cat /root/tdz-server-location.txt 2>/dev/null || echo "Singapore")
+SERVER_ISP=$(cat /root/tdz-server-isp.txt 2>/dev/null || echo "Digital Ocean")
+USER_DB="/etc/tdz/users.json"
+source /etc/tdz/user-manager.sh
+
+initialize_db
+
+show_dashboard() {
+    while true; do
+        clear
+        echo -e "${GREEN}"
+        echo "╔══════════════════════════════════════════════════════════╗"
+        echo "║                   Tdz Tunnel Dashboard                   ║"
+        echo "║               Developer: Yeasinul Hoque Tuhin            ║"
+        echo "╚══════════════════════════════════════════════════════════╝"
+        echo -e "${NC}"
+        
+        # Server status
+        echo -e "${BLUE}🖥️  SERVER STATUS:${NC}"
+        if systemctl is-active --quiet xray; then
+            echo -e "   Xray Service: ${GREEN}● Running${NC}"
+        else
+            echo -e "   Xray Service: ${RED}● Stopped${NC}"
+        fi
+        
+        # User count
+        USER_COUNT=$(jq '.users | length' "$USER_DB")
+        echo -e "   Total Users: ${CYAN}$USER_COUNT${NC}"
+        
+        # System info
+        echo -e "   CPU Usage: $(top -bn1 | grep "Cpu(s)" | awk '{print $2}')%"
+        echo -e "   Memory Usage: $(free -m | awk 'NR==2{printf "%.2f%%", $3*100/$2}')"
+        echo -e "   Disk Usage: $(df -h / | awk 'NR==2{print $5}')"
+        
+        echo -e "${GREEN}╔══════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${BLUE}📊 MAIN MENU:${NC}"
+        echo -e "   ${GREEN}1${NC}. User Management"
+        echo -e "   ${GREEN}2${NC}. Protocol Configuration" 
+        echo -e "   ${GREEN}3${NC}. Server Information"
+        echo -e "   ${GREEN}4${NC}. Service Control"
+        echo -e "   ${GREEN}5${NC}. View Logs"
+        echo -e "   ${GREEN}6${NC}. Backup & Restore"
+        echo -e "   ${GREEN}7${NC}. Uninstall"
+        echo -e "   ${GREEN}0${NC}. Exit"
+        echo -e "${GREEN}╚══════════════════════════════════════════════════════════╝${NC}"
+        
+        read -p "Select an option [0-7]: " main_choice
+
+        case $main_choice in
+            1) user_management ;;
+            2) protocol_management ;;
+            3) server_information ;;
+            4) service_control ;;
+            5) view_logs ;;
+            6) backup_restore ;;
+            7) uninstall_tdz ;;
+            0) exit 0 ;;
+            *) echo -e "${RED}Invalid option!${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+user_management() {
+    while true; do
+        clear
+        echo -e "${GREEN}"
+        echo "╔══════════════════════════════════════════════════════════╗"
+        echo "║                   User Management                        ║"
+        echo "╚══════════════════════════════════════════════════════════╝"
+        echo -e "${NC}"
+        
+        echo -e "${BLUE}👥 USER OPTIONS:${NC}"
+        echo -e "   ${GREEN}1${NC}. Create New User"
+        echo -e "   ${GREEN}2${NC}. List All Users"
+        echo -e "   ${GREEN}3${NC}. Delete User"
+        echo -e "   ${GREEN}4${NC}. View User Details"
+        echo -e "   ${GREEN}5${NC}. Generate User Links"
+        echo -e "   ${GREEN}6${NC}. Back to Main Menu"
+        
+        read -p "Select an option [1-6]: " user_choice
+
+        case $user_choice in
+            1) create_user_menu ;;
+            2) list_users_menu ;;
+            3) delete_user_menu ;;
+            4) view_user_details ;;
+            5) generate_links_menu ;;
+            6) return ;;
+            *) echo -e "${RED}Invalid option!${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+create_user_menu() {
+    clear
+    echo -e "${GREEN}"
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║                   Create New User                        ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+    
+    echo -e "${YELLOW}Select Protocol:${NC}"
+    echo -e "   ${GREEN}1${NC}. VLESS"
+    echo -e "   ${GREEN}2${NC}. VMESS"
+    echo -e "   ${GREEN}3${NC}. Trojan"
+    echo -e "   ${GREEN}4${NC}. Back"
+    
+    read -p "Select protocol [1-4]: " proto_choice
+    
+    case $proto_choice in
+        1) protocol="vless" ;;
+        2) protocol="vmess" ;;
+        3) protocol="trojan" ;;
+        4) return ;;
+        *) echo -e "${RED}Invalid choice!${NC}"; sleep 1; return ;;
+    esac
+    
+    read -p "Enter remark name: " remark
+    read -p "Enter expiry days: " expiry_days
+    
+    if [ "$protocol" = "vless" ] || [ "$protocol" = "vmess" ]; then
+        user_id=$(create_user "$protocol" "$remark" "$expiry_days")
+        expiry_date=$(date -d "+$expiry_days days" +"%d/%m/%Y")
+        show_user_result "$protocol" "$remark" "$user_id" "$expiry_date"
+    else
+        password=$(create_user "$protocol" "$remark" "$expiry_days")
+        expiry_date=$(date -d "+$expiry_days days" +"%d/%m/%Y")
+        show_user_result "$protocol" "$remark" "$password" "$expiry_date"
+    fi
+    
+    read -p "Press Enter to continue..."
+}
+
+show_user_result() {
+    local protocol=$1
+    local remark=$2
+    local user_id=$3
+    local expiry_date=$4
+    
+    clear
+    echo -e "${GREEN}"
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║                   User Created Successfully!             ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+    
+    echo -e "${BLUE}📋 USER DETAILS:${NC}"
+    echo -e "   Protocol: ${CYAN}$protocol${NC}"
+    echo -e "   Remark: ${CYAN}$remark${NC}"
+    echo -e "   Expiry Date: ${YELLOW}$expiry_date${NC}"
+    
+    if [ "$protocol" = "vless" ] || [ "$protocol" = "vmess" ]; then
+        echo -e "   UUID: ${MAGENTA}$user_id${NC}"
+    else
+        echo -e "   Password: ${MAGENTA}$user_id${NC}"
+    fi
+    
+    echo -e "${GREEN}╔══════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BLUE}🔗 CONFIGURATION LINKS:${NC}"
+    generate_links "$protocol" "$user_id" "$remark"
+    echo -e "${GREEN}╚══════════════════════════════════════════════════════════╝${NC}"
+}
+
+list_users_menu() {
+    clear
+    echo -e "${GREEN}"
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║                   All Users                              ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+    
+    if [ ! -s "$USER_DB" ] || [ "$(jq '.users | length' "$USER_DB")" -eq 0 ]; then
+        echo -e "${YELLOW}No users found.${NC}"
+    else
+        jq -r '.users[] | "\(.protocol) - \(.remark) - Expiry: \(.expiry_date)"' "$USER_DB"
+    fi
+    
+    echo -e "\n${GREEN}Press Enter to continue...${NC}"
+    read
+}
+
+delete_user_menu() {
+    clear
+    echo -e "${GREEN}"
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║                   Delete User                            ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+    
+    if [ ! -s "$USER_DB" ] || [ "$(jq '.users | length' "$USER_DB")" -eq 0 ]; then
+        echo -e "${YELLOW}No users found.${NC}"
+        sleep 1
+        return
+    fi
+    
+    echo -e "${YELLOW}Current Users:${NC}"
+    jq -r '.users[] | "\(.remark) (\(.protocol))"' "$USER_DB"
+    echo ""
+    read -p "Enter remark name to delete: " del_remark
+    
+    # Remove user from database
+    tmp=$(mktemp)
+    jq --arg remark "$del_remark" '.users |= map(select(.remark != $remark))' "$USER_DB" > "$tmp" && mv "$tmp" "$USER_DB"
+    
+    echo -e "${GREEN}User '$del_remark' deleted successfully!${NC}"
+    sleep 1
+}
+
+generate_links_menu() {
+    clear
+    echo -e "${GREEN}"
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║                   Generate Links                         ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+    
+    if [ ! -s "$USER_DB" ] || [ "$(jq '.users | length' "$USER_DB")" -eq 0 ]; then
+        echo -e "${YELLOW}No users found.${NC}"
+        sleep 1
+        return
+    fi
+    
+    echo -e "${YELLOW}Select User:${NC}"
+    jq -r '.users[] | "\(.remark) (\(.protocol))"' "$USER_DB"
+    echo ""
+    read -p "Enter remark name: " gen_remark
+    
+    user_info=$(jq -r --arg remark "$gen_remark" '.users[] | select(.remark == $remark)' "$USER_DB")
+    if [ -z "$user_info" ]; then
+        echo -e "${RED}User not found!${NC}"
+        sleep 1
+        return
+    fi
+    
+    protocol=$(echo "$user_info" | jq -r '.protocol')
+    user_id=$(echo "$user_info" | jq -r '.uuid // .password')
+    
+    clear
+    echo -e "${GREEN}"
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║                   Configuration Links                    ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+    
+    generate_links "$protocol" "$user_id" "$gen_remark"
+    
+    echo -e "\n${GREEN}Press Enter to continue...${NC}"
+    read
+}
+
+generate_links() {
+    local protocol=$1
+    local user_id=$2
+    local remark=$3
+    local domain=$(grep "Domain:" "$CONFIG_FILE" | cut -d' ' -f2)
+    
+    case $protocol in
+        "vless")
+            echo -e "${BLUE}VLESS Links:${NC}"
+            echo -e "${CYAN}vless://$user_id@$domain:443?type=tcp&security=tls&flow=xtls-rprx-vision#$remark${NC}"
+            echo -e "${CYAN}vless://$user_id@$domain:80?type=ws&path=/TuhinDroidZone&host=$domain#$remark${NC}"
+            ;;
+        "vmess")
+            echo -e "${BLUE}VMESS Links:${NC}"
+            vmess_config=$(jq -n --arg id "$user_id" --arg add "$domain" --arg ps "$remark" \
+                '{v: "2", ps: $ps, add: $add, port: "8443", id: $id, aid: "0", net: "ws", type: "none", path: "/TuhinDroidZone", tls: "tls"}')
+            echo -e "${CYAN}vmess://$(echo "$vmess_config" | base64 -w 0)${NC}"
+            ;;
+        "trojan")
+            echo -e "${BLUE}Trojan Links:${NC}"
+            echo -e "${CYAN}trojan://$user_id@$domain:2095?security=tls&type=tcp#$remark${NC}"
+            echo -e "${CYAN}trojan://$user_id@$domain:2096?security=tls&type=grpc&serviceName=Tuhin-Internet-Service#$remark${NC}"
+            ;;
+    esac
+}
+
+protocol_management() {
+    clear
+    echo -e "${GREEN}"
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║                   Protocol Management                    ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+    
+    echo -e "${BLUE}🌐 ACTIVE PROTOCOLS:${NC}"
+    echo -e "   ${GREEN}●${NC} VLESS (TCP-TLS) - Port 443"
+    echo -e "   ${GREEN}●${NC} VLESS (WS-NTLS) - Port 80"
+    echo -e "   ${GREEN}●${NC} VMESS (WS-TLS) - Port 8443"
+    echo -e "   ${GREEN}●${NC} VMESS (WS-NTLS) - Port 8080"
+    echo -e "   ${GREEN}●${NC} Trojan (TCP-TLS) - Port 2095"
+    echo -e "   ${GREEN}●${NC} Trojan (gRPC-TLS) - Port 2096"
+    
+    echo -e "\n${BLUE}📊 CONFIGURATION:${NC}"
+    echo -e "   WebSocket Path: ${CYAN}/TuhinDroidZone${NC}"
+    echo -e "   gRPC Service: ${CYAN}Tuhin-Internet-Service${NC}"
+    echo -e "   Domain: ${CYAN}$domain${NC}"
+    
+    echo -e "\n${GREEN}Press Enter to continue...${NC}"
+    read
+}
+
+server_information() {
+    clear
+    echo -e "${GREEN}"
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║                   Server Information                     ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+    
+    echo -e "${BLUE}🖥️  SYSTEM INFO:${NC}"
+    echo -e "   Hostname: $(hostname)"
+    echo -e "   OS: $(lsb_release -ds 2>/dev/null || cat /etc/*release 2>/dev/null | head -n1)"
+    echo -e "   Kernel: $(uname -r)"
+    echo -e "   Uptime: $(uptime -p | sed 's/up //')"
+    
+    echo -e "\n${BLUE}📡 NETWORK INFO:${NC}"
+    echo -e "   Public IP: $(curl -s ifconfig.me)"
+    echo -e "   Location: ${SERVER_LOCATION}"
+    echo -e "   ISP: ${SERVER_ISP}"
+    
+    echo -e "\n${BLUE}📈 RESOURCE USAGE:${NC}"
+    echo -e "   CPU Usage: $(top -bn1 | grep "Cpu(s)" | awk '{print $2}')%"
+    echo -e "   Memory: $(free -m | awk 'NR==2{printf "%s/%s MB (%.2f%%)", $3, $2, $3*100/$2}')"
+    echo -e "   Disk: $(df -h / | awk 'NR==2{printf "%s/%s (%s)", $3, $2, $5}')"
+    
+    echo -e "\n${GREEN}Press Enter to continue...${NC}"
+    read
+}
+
+service_control() {
+    while true; do
+        clear
+        echo -e "${GREEN}"
+        echo "╔══════════════════════════════════════════════════════════╗"
+        echo "║                   Service Control                        ║"
+        echo "╚══════════════════════════════════════════════════════════╝"
+        echo -e "${NC}"
+        
+        echo -e "${BLUE}🛠️  SERVICE STATUS:${NC}"
+        if systemctl is-active --quiet xray; then
+            echo -e "   Xray: ${GREEN}● Running${NC}"
+        else
+            echo -e "   Xray: ${RED}● Stopped${NC}"
+        fi
+        
+        echo -e "\n${BLUE}⚙️  OPTIONS:${NC}"
+        echo -e "   ${GREEN}1${NC}. Start Xray"
+        echo -e "   ${GREEN}2${NC}. Stop Xray"
+        echo -e "   ${GREEN}3${NC}. Restart Xray"
+        echo -e "   ${GREEN}4${NC}. Check Status"
+        echo -e "   ${GREEN}5${NC}. View Logs"
+        echo -e "   ${GREEN}6${NC}. Back to Main Menu"
+        
+        read -p "Select an option [1-6]: " service_choice
+
+        case $service_choice in
+            1) systemctl start xray; echo -e "${GREEN}Xray started!${NC}"; sleep 1 ;;
+            2) systemctl stop xray; echo -e "${YELLOW}Xray stopped!${NC}"; sleep 1 ;;
+            3) systemctl restart xray; echo -e "${GREEN}Xray restarted!${NC}"; sleep 1 ;;
+            4) clear; systemctl status xray --no-pager -l; echo -e "\n${GREEN}Press Enter to continue...${NC}"; read ;;
+            5) view_logs ;;
+            6) return ;;
+            *) echo -e "${RED}Invalid option!${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+view_logs() {
+    clear
+    echo -e "${GREEN}"
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║                   View Logs                              ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+    
+    echo -e "${BLUE}📋 LOG FILES:${NC}"
+    echo -e "   ${GREEN}1${NC}. Xray Access Log"
+    echo -e "   ${GREEN}2${NC}. Xray Error Log"
+    echo -e "   ${GREEN}3${NC}. System Log"
+    echo -e "   ${GREEN}4${NC}. Back"
+    
+    read -p "Select log file [1-4]: " log_choice
+
+    case $log_choice in
+        1) tail -50 /var/log/tdz/access.log 2>/dev/null || echo "No access log found" ;;
+        2) tail -50 /var/log/tdz/error.log 2>/dev/null || echo "No error log found" ;;
+        3) journalctl -u xray -n 20 --no-pager ;;
+        4) return ;;
+        *) echo -e "${RED}Invalid option!${NC}"; sleep 1; return ;;
+    esac
+    
+    echo -e "\n${GREEN}Press Enter to continue...${NC}"
+    read
+}
+
+backup_restore() {
+    clear
+    echo -e "${GREEN}"
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║                   Backup & Restore                       ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+    
+    echo -e "${BLUE}💾 OPTIONS:${NC}"
+    echo -e "   ${GREEN}1${NC}. Backup Configuration"
+    echo -e "   ${GREEN}2${NC}. Restore Configuration"
+    echo -e "   ${GREEN}3${NC}. Back to Main Menu"
+    
+    read -p "Select an option [1-3]: " backup_choice
+
+    case $backup_choice in
+        1)
+            BACKUP_DIR="/root/tdz-backup-$(date +%Y%m%d-%H%M%S)"
+            mkdir -p "$BACKUP_DIR"
+            cp -r /etc/tdz/ "$BACKUP_DIR/"
+            cp /usr/local/etc/xray/config.json "$BACKUP_DIR/"
+            echo -e "${GREEN}Backup created at: $BACKUP_DIR${NC}"
+            ;;
+        2)
+            read -p "Enter backup directory path: " restore_dir
+            if [ -d "$restore_dir" ]; then
+                cp -r "$restore_dir"/* /etc/tdz/
+                cp "$restore_dir/config.json" /usr/local/etc/xray/
+                systemctl restart xray
+                echo -e "${GREEN}Configuration restored!${NC}"
+            else
+                echo -e "${RED}Backup directory not found!${NC}"
+            fi
+            ;;
+        3) return ;;
+        *) echo -e "${RED}Invalid option!${NC}"; sleep 1 ;;
+    esac
+    sleep 2
+}
+
+uninstall_tdz() {
+    echo -e "${RED}"
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║                   Uninstall Tdz Tunnel                   ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+    
+    read -p "Are you sure you want to uninstall? (y/N): " confirm
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        echo -e "${YELLOW}Uninstalling Tdz Tunnel...${NC}"
+        
+        systemctl stop xray
+        systemctl disable xray
+        rm -rf /usr/local/bin/tdz
+        rm -rf /usr/local/etc/xray
+        rm -rf /etc/tdz
+        rm -f /root/tdz-config.txt
+        rm -f /root/tdz-server-*
+        rm -rf /var/log/tdz
+        
+        echo -e "${GREEN}Tdz Tunnel uninstalled successfully!${NC}"
+    else
+        echo -e "${GREEN}Uninstall cancelled.${NC}"
+    fi
+    echo -e "${NC}"
+    exit 0
+}
+
+# Start the dashboard
+if [ $# -eq 0 ]; then
+    show_dashboard
+else
+    case $1 in
+        "1") user_management ;;
+        "2") protocol_management ;;
+        "3") server_information ;;
+        "4") service_control ;;
+        "5") view_logs ;;
+        "6") backup_restore ;;
+        "7") uninstall_tdz ;;
+        *) show_dashboard ;;
+    esac
+fi
+EOF
+
+chmod +x /usr/local/bin/tdz
+
+# Save config
+cat > /root/tdz-config.txt << EOF
+Domain: $DOMAIN
+VLESS UUID: $UUID_VLESS
+VMESS UUID: $UUID_VMESS
+Trojan Password: $UUID_TROJAN
+Installation Date: $(date)
+Server Location: $SERVER_LOCATION
+Server ISP: $SERVER_ISP
+WS Path: /TuhinDroidZone
+gRPC Service Name: Tuhin-Internet-Service
+EOF
+
+# Initialize user database
+mkdir -p /etc/tdz
+echo '{"users": []}' > /etc/tdz/users.json
+
+# Create log directory
+mkdir -p /var/log/tdz
+
+# Completion message
+log_success "Installation completed!"
+echo -e "${GREEN}"
+echo "=================================================="
+echo "           Tdz Tunnel Setup Complete!"
+echo "=================================================="
+echo -e "${NC}"
+echo "Dashboard: ${CYAN}tdz${NC}"
+echo "User Management: ${CYAN}tdz -> 1${NC}"
+echo "Server Info: ${CYAN}tdz -> 3${NC}"
+echo "Service Control: ${CYAN}tdz -> 4${NC}"
+echo ""
+echo "Config saved to: ${CYAN}/root/tdz-config.txt${NC}"
+echo "User database: ${CYAN}/etc/tdz/users.json${NC}"require_root
 
 # ---------- Update system and install prerequisites ----------
 log_info "Updating system packages..."

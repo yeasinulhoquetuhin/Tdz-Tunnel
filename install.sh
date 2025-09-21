@@ -1,39 +1,374 @@
 #!/usr/bin/env bash
+# Tdz Tunnel - Full Installer (Xray) with management CLI
+# Developer: Yeasinul Hoque Tuhin
+# Website: tuhinbro.website
+# Features:
+#  - Installs Xray-core
+#  - Generates config supporting VLESS (WS+TLS), VMess (WS), Trojan (TCP)
+#  - Default WS path: /TuhinDroidZone (can be changed during install)
+#  - Systemd service: /etc/systemd/system/tuhin-internet.service (Description: "Tuhin - Internet Service")
+#  - Obtains TLS certs using certbot (Let's Encrypt) (interactive)
+#  - Management CLI: /usr/local/bin/tdz (add/list/delete/genlinks)
+#  - Users stored in /etc/tdz/users.json
+#  - Expiry checker cron installed
+#
+# IMPORTANT: Run this script as root on Debian/Ubuntu-based systems.
+#            Backup any existing Xray configs before running.
 
-Tdz Tunnel - Xray automatic installer & simple account manager
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
 
-Developer: Yeasinul Hoque Tuhin
-
-Usage: curl -sSL https://.../install_tdz_tunnel.sh | bash
-
-This script installs Xray (core), creates default config supporting VLESS, VMESS, TROJAN
-
-and installs a management CLI: /usr/local/bin/tdz
-
-NOTE: This is a template. Traffic-quota enforcement requires additional system integration
-
-(vnstat, xray stats API or nftables/tc). See notes at the end of the script.
-
-set -euo pipefail export DEBIAN_FRONTEND=noninteractive
-
---------- Helper funcs ---------
-
-msg() { echo -e "[TDZ] $"; } err() { echo -e "[TDZ][ERR] $" >&2; exit 1; } require_root() { [ "$(id -u)" -eq 0 ] || err "Run as root"; }
-
+msg(){ echo -e "[TDZ] $*"; }
+err(){ echo -e "[TDZ][ERR] $*" >&2; exit 1; }
+require_root(){ [ "$(id -u)" -eq 0 ] || err "This script must be run as root"; }
 require_root
 
---------- Variables (change if you like) ---------
-
-TDZ_DIR="/etc/tdz" XRAY_DIR="/etc/xray" XRAY_CONFIG="$XRAY_DIR/tdz_config.json" USERS_DB="$TDZ_DIR/users.json" TDZ_BIN="/usr/local/bin/tdz" DOMAIN="$(hostname -f 2>/dev/null || echo "$(curl -s ifconfig.me || echo "YOUR_DOMAIN")")" UUID_BIN="$(command -v uuidgen || true)"
-
-Ensure dirs
+# ---------- Defaults (you can override interactively) ----------
+DEFAULT_WS_PATH="/TuhinDroidZone"
+DEFAULT_SERVICE_NAME="tuhin-internet.service"
+TDZ_DIR="/etc/tdz"
+XRAY_DIR="/etc/xray"
+XRAY_CONFIG="$XRAY_DIR/tdz_config.json"
+USERS_DB="$TDZ_DIR/users.json"
+TDZ_BIN="/usr/local/bin/tdz"
+EXPIRY_CHECKER="/usr/local/bin/tdz-expiry-check"
 
 mkdir -p "$TDZ_DIR" "$XRAY_DIR" /var/log/tdz || true
 
---------- Install prerequisites ---------
+# ---------- Interactive prompts (with defaults) ----------
+read -rp "Enter domain to use for TLS (leave empty to skip certbot and use self-signed): " DOMAIN
+if [ -z "$DOMAIN" ]; then
+  msg "No domain provided — TLS via certbot will be skipped. We'll create a self-signed cert (not recommended for production)."
+  USE_CERTBOT=0
+else
+  USE_CERTBOT=1
+fi
 
-install_prereq(){ msg "Installing prerequisites (curl, jq, socat, lsof)..." apt-get update -y apt-get install -y curl wget gnupg2 apt-transport-https lsb-release ca-certificates curl jq socat lsof }
+read -rp "Enter websocket path (default: $DEFAULT_WS_PATH): " WS_PATH
+WS_PATH=${WS_PATH:-$DEFAULT_WS_PATH}
+# normalize leading slash
+if [[ "$WS_PATH" != /* ]]; then WS_PATH="/$WS_PATH"; fi
 
+read -rp "Enter systemd service name (default: $DEFAULT_SERVICE_NAME): " SERVICE_NAME
+SERVICE_NAME=${SERVICE_NAME:-$DEFAULT_SERVICE_NAME}
+
+msg "Using domain: ${DOMAIN:-(none)}"
+msg "Using websocket path: $WS_PATH"
+msg "Service name: $SERVICE_NAME"
+
+sleep 1
+
+# ---------- Install prerequisites ----------
+msg "Installing prerequisites..."
+apt-get update -y
+apt-get install -y curl wget gnupg2 apt-transport-https lsb-release ca-certificates unzip jq socat openssl cron sudo software-properties-common
+
+if [ "$USE_CERTBOT" -eq 1 ]; then
+  apt-get install -y certbot
+fi
+
+# ---------- Install Xray (official) ----------
+msg "Installing Xray-core..."
+# Attempt official installer for reliability
+bash <(curl -sL https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh) || err "Xray install failed"
+
+if ! command -v xray >/dev/null 2>&1; then
+  err "xray binary not found after install"
+fi
+
+# ---------- TLS: certbot or self-signed ----------
+CERT_FULLCHAIN=""
+CERT_PRIVKEY=""
+if [ "$USE_CERTBOT" -eq 1 ]; then
+  msg "Obtaining TLS certificate for $DOMAIN using certbot (standalone). Make sure port 80 is free."
+  systemctl stop nginx apache2 2>/dev/null || true
+  if certbot certonly --standalone -d "$DOMAIN" --non-interactive --agree-tos -m "admin@$DOMAIN"; then
+    CERT_FULLCHAIN="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
+    CERT_PRIVKEY="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+    msg "Obtained certs: $CERT_FULLCHAIN"
+  else
+    msg "certbot failed — falling back to self-signed certificate"
+    USE_CERTBOT=0
+  fi
+fi
+
+if [ "$USE_CERTBOT" -eq 0 ]; then
+  msg "Creating self-signed certificate for $DOMAIN (or for host)"
+  HOST_CN=${DOMAIN:-"$(hostname -f 2>/dev/null || echo "localhost")"}
+  mkdir -p /etc/tdz/certs
+  openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+    -keyout /etc/tdz/certs/tdz.key -out /etc/tdz/certs/tdz.crt -subj "/CN=$HOST_CN"
+  CERT_FULLCHAIN="/etc/tdz/certs/tdz.crt"
+  CERT_PRIVKEY="/etc/tdz/certs/tdz.key"
+  msg "Self-signed cert created at $CERT_FULLCHAIN"
+fi
+
+# ---------- Generate Xray config ----------
+msg "Generating Xray config at $XRAY_CONFIG ..."
+cat > "$XRAY_CONFIG" <<EOF
+{
+  "log": {"access": "/var/log/tdz/access.log", "error": "/var/log/tdz/error.log", "loglevel": "warning"},
+  "inbounds": [
+    {
+      "port": 443,
+      "protocol": "vless",
+      "settings": {"clients": []},
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "wsSettings": {"path": "$WS_PATH"},
+        "tlsSettings": {"certificates": [{"certificateFile": "$CERT_FULLCHAIN","keyFile": "$CERT_PRIVKEY"}]}
+      }
+    },
+    {
+      "port": 8443,
+      "protocol": "vmess",
+      "settings": {"clients": []},
+      "streamSettings": {"network": "ws", "wsSettings": {"path": "$WS_PATH"}}
+    },
+    {
+      "port": 2083,
+      "protocol": "trojan",
+      "settings": {"clients": []},
+      "streamSettings": {"network": "tcp"}
+    }
+  ],
+  "outbounds": [
+    {"protocol": "freedom","settings": {}},
+    {"protocol": "blackhole","settings": {}, "tag": "blocked"}
+  ],
+  "policy": {"levels": {"0": {"uplinkOnly": 0, "downlinkOnly": 0}}},
+  "transport": {}
+}
+EOF
+
+# set correct permissions
+chown -R root:root "$XRAY_DIR"
+chmod -R 644 "$XRAY_CONFIG"
+
+# ---------- Systemd service with custom name & description ----------
+msg "Creating systemd service: /etc/systemd/system/$SERVICE_NAME"
+cat >/etc/systemd/system/$SERVICE_NAME <<EOL
+[Unit]
+Description=Tuhin - Internet Service
+After=network.target nss-lookup.target
+
+[Service]
+User=root
+ExecStart=/usr/local/bin/xray -config $XRAY_CONFIG
+Restart=on-failure
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOL
+
+systemctl daemon-reload
+systemctl enable --now "$SERVICE_NAME" || true
+
+# ---------- Users DB and management CLI ----------
+if [ ! -f "$USERS_DB" ]; then
+  echo '{"users":[]}' > "$USERS_DB"
+fi
+
+msg "Installing management CLI at $TDZ_BIN"
+cat > "$TDZ_BIN" <<'TDZ'
+#!/usr/bin/env bash
+# tdz - account manager for Tdz Tunnel
+TDZ_DIR="/etc/tdz"
+XRAY_CFG="/etc/xray/tdz_config.json"
+USERS_DB="$TDZ_DIR/users.json"
+
+require_root(){ [ "$(id -u)" -eq 0 ] || { echo "Run as root"; exit 1; } }
+require_root
+
+usage(){ cat <<USAGE
+Usage: tdz <command>
+Commands:
+  add <name> [--id UUID] [--path PATH] [--limit MB] [--expiry DAYS]
+  delete <id_or_name>
+  list
+  show <id_or_name>
+  genlinks <id_or_name_or_id>
+  help
+USAGE
+}
+
+rand_uuid(){ if command -v uuidgen >/dev/null 2>&1; then uuidgen; else cat /proc/sys/kernel/random/uuid; fi }
+
+add_user(){
+  NAME="$1"; shift
+  ID=""; CUSTOM_PATH=""; LIMIT=0; EXP=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --id) ID="$2"; shift 2;;
+      --path) CUSTOM_PATH="$2"; shift 2;;
+      --limit) LIMIT="$2"; shift 2;;
+      --expiry) EXP="$2"; shift 2;;
+      *) shift;;
+    esac
+  done
+  [ -n "$ID" ] || ID=$(rand_uuid)
+  [ -n "$CUSTOM_PATH" ] || CUSTOM_PATH="/TuhinDroidZone"
+  CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  USER_OBJ=$(jq -n --arg id "$ID" --arg name "$NAME" --arg created "$CREATED" --arg path "$CUSTOM_PATH" --argjson limit $LIMIT --argjson exp $EXP '{id:$id, name:$name, created:$created, path:$path, limit:$limit, expiry_days:$exp, disabled:false}')
+  tmp=$(mktemp)
+  jq ".users += [$USER_OBJ]" "$USERS_DB" > "$tmp" && mv "$tmp" "$USERS_DB"
+
+  # inject into xray config
+  tmp2=$(mktemp)
+  jq --arg id "$ID" --arg email "$NAME" --arg path "$CUSTOM_PATH" '
+  .inbounds[0].settings.clients += [{"id":$id, "email":$email}] |
+  .inbounds[1].settings.clients += [{"id":$id, "email":$email, "alterId":0}] |
+  .inbounds[2].settings.clients += [{"password":$id, "email":$email}]' "$XRAY_CFG" > "$tmp2" && mv "$tmp2" "$XRAY_CFG"
+
+  systemctl restart tuhin-internet.service >/dev/null 2>&1 || true
+  echo "Added user: $NAME (id: $ID)"
+  echo "Run: tdz genlinks $ID to get client links"
+}
+
+delete_user(){
+  KEY="$1"
+  tmp=$(mktemp)
+  jq --arg key "$KEY" '.users |= map(select(.id != $key and .name != $key))' "$USERS_DB" > "$tmp" && mv "$tmp" "$USERS_DB"
+
+  tmp2=$(mktemp)
+  jq --arg key "$KEY" '
+  .inbounds[0].settings.clients |= map(select(.id != $key and .email != $key)) |
+  .inbounds[1].settings.clients |= map(select(.id != $key and .email != $key)) |
+  .inbounds[2].settings.clients |= map(select(.password != $key and .email != $key))' "$XRAY_CFG" > "$tmp2" && mv "$tmp2" "$XRAY_CFG"
+
+  systemctl restart tuhin-internet.service >/dev/null 2>&1 || true
+  echo "Deleted: $KEY"
+}
+
+list_users(){
+  jq -r '.users[] | "- id:\t" + .id + "\tname:\t" + .name + "\tpath:\t" + .path + "\tcreated:\t" + .created + "\tlimit(MB):\t" + (.limit|tostring) + "\texpiry_days:\t" + (.expiry_days|tostring) + "\tdisabled:\t" + (.disabled|tostring)' "$USERS_DB"
+}
+
+show_user(){
+  KEY="$1"
+  jq -r --arg key "$KEY" '.users[] | select(.id==$key or .name==$key) | to_entries[] | "\(.key): \(.value)"' "$USERS_DB"
+}
+
+genlinks(){
+  KEY="$1"
+  USER=$(jq -r --arg key "$KEY" '.users[] | select(.id==$key or .name==$key) | @base64' "$USERS_DB" | head -n1 || true)
+  if [ -z "$USER" ]; then echo "User not found"; exit 1; fi
+  _u() { echo "$1" | base64 -d | jq -r ".${2}"; }
+  ID=$(_u "$USER" id)
+  NAME=$(_u "$USER" name)
+  PATH=$(_u "$USER" path)
+  DOMAIN=$(jq -r '. | "'"'${HOSTNAME}'"' ' /etc/tdz/ 2>/dev/null || echo "$(hostname -f)")
+  # read domain from config TLS settings if present
+  CFG_DOMAIN="$(jq -r '.inbounds[0].streamSettings.tlsSettings.certificates[0].certificateFile' /etc/xray/tdz_config.json 2>/dev/null || true)"
+  if [ -n "$CFG_DOMAIN" ]; then DOMAIN="$CFG_DOMAIN"; fi
+  VLESS_PORT=$(jq -r '.inbounds[0].port' /etc/xray/tdz_config.json)
+  VMESS_PORT=$(jq -r '.inbounds[1].port' /etc/xray/tdz_config.json)
+  TROJAN_PORT=$(jq -r '.inbounds[2].port' /etc/xray/tdz_config.json)
+
+  echo "=== Client links for $NAME ==="
+  VLESS_LINK="vless://${ID}@${DOMAIN}:${VLESS_PORT}?path=${PATH}&security=tls&type=ws#${NAME}-vless"
+  echo "VLESS (WS+TLS): $VLESS_LINK"
+
+  VMESS_JSON=$(jq -n --arg id "$ID" --arg host "$DOMAIN" --arg path "$PATH" '{v: "2", ps: "'"'${NAME}-vmess'"'", add: $host, port: '"$VMESS_PORT"', id: $id, aid: "0", net: "ws", type: "none", host: "", path: $path, tls: "tls"}')
+  VMESS_B64=$(echo -n "$VMESS_JSON" | base64 -w0)
+  echo "VMESS (base64): vmess://$VMESS_B64"
+
+  TROJAN_LINK="trojan://${ID}@${DOMAIN}:${TROJAN_PORT}#${NAME}-trojan"
+  echo "TROJAN: $TROJAN_LINK"
+}
+
+case "${1:-help}" in
+  add) shift; add_user "$@" ;;
+  delete) shift; delete_user "$1" ;;
+  list) list_users ;;
+  show) shift; show_user "$1" ;;
+  genlinks) shift; genlinks "$1" ;;
+  help|*) usage ;;
+esac
+TDZ
+
+chmod +x "$TDZ_BIN"
+
+# ---------- Expiry checker cron ----------
+msg "Installing expiry checker cron (runs every 10 minutes)"
+cat >/etc/cron.d/tdz-expiry <<CRON
+*/10 * * * * root $EXPIRY_CHECKER >/var/log/tdz/expiry.log 2>&1
+CRON
+
+cat > "$EXPIRY_CHECKER" <<'CHECK'
+#!/usr/bin/env bash
+USERS_DB="/etc/tdz/users.json"
+XRAY_CFG="/etc/xray/tdz_config.json"
+[ -f "$USERS_DB" ] || exit 0
+for u in $(jq -c '.users[]' "$USERS_DB"); do
+  id=$(echo "$u" | jq -r '.id')
+  name=$(echo "$u" | jq -r '.name')
+  created=$(echo "$u" | jq -r '.created')
+  expiry_days=$(echo "$u" | jq -r '.expiry_days')
+  if [ "$expiry_days" -gt 0 ]; then
+    created_epoch=$(date -d "$created" +%s)
+    now_epoch=$(date -u +%s)
+    expire_epoch=$((created_epoch + expiry_days*86400))
+    if [ $now_epoch -ge $expire_epoch ]; then
+      tmp=$(mktemp)
+      jq --arg id "$id" '.users |= map(if .id==$id then .disabled=true else . end)' "$USERS_DB" > "$tmp" && mv "$tmp" "$USERS_DB"
+      tmp2=$(mktemp)
+      jq --arg key "$id" '
+      .inbounds[0].settings.clients |= map(select(.id != $key)) |
+      .inbounds[1].settings.clients |= map(select(.id != $key)) |
+      .inbounds[2].settings.clients |= map(select(.password != $key))' "$XRAY_CFG" > "$tmp2" && mv "$tmp2" "$XRAY_CFG"
+      systemctl restart tuhin-internet.service || true
+      echo "Disabled expired user: $name ($id)"
+    fi
+  fi
+done
+CHECK
+chmod +x "$EXPIRY_CHECKER"
+
+# ---------- Final checks ----------
+msg "Restarting service and checking status..."
+systemctl restart "$SERVICE_NAME" || true
+sleep 2
+systemctl status "$SERVICE_NAME" --no-pager || true
+
+cat <<FIN
+
+INSTALLATION COMPLETE ✅
+Files & helpers:
+ - Xray config: $XRAY_CONFIG
+ - Users DB: $USERS_DB
+ - CLI manager: $TDZ_BIN (use: tdz add, tdz list, tdz genlinks ...)
+ - Service: systemctl (name: $SERVICE_NAME, Description: "Tuhin - Internet Service")
+ - Logs: /var/log/tdz/
+
+Notes & next steps:
+ - If you used a real domain, certbot was used to obtain TLS. If certbot failed, a self-signed cert was created.
+ - To add a user with custom UUID and custom WS path:
+     sudo tdz add "username" --id 123e4567-e89b-12d3-a456-426614174000 --path /TuhinDroidZone --expiry 30
+ - To list users:
+     sudo tdz list
+ - To generate client links:
+     sudo tdz genlinks username_or_id
+
+I tried to make this robust, but I cannot *guarantee* clients will connect in every environment (ports, firewall, NAT, provider blocks). If a client cannot connect:
+ - Check ports 80/443/8443/2083 are open in both VPS firewall (ufw/iptables) and cloud provider security group.
+ - Ensure DNS for your domain points to the VPS public IP.
+ - Check logs: tail -n 200 /var/log/tdz/error.log
+ - Check service: systemctl status $SERVICE_NAME
+
+If you want, I can now:
+ - Add automatic Let's Encrypt renewal hooks (certbot renew deploy-hook to restart service)
+ - Implement per-user traffic quota using Xray stats API
+ - Add a simple web panel to view users & usage
+
+Developer: Yeasinul Hoque Tuhin
+Website: tuhinbro.website
+
+FIN
+
+exit 0
 --------- Install Xray core (official binary) ---------
 
 install_xray(){ msg "Installing Xray-core (latest)..." XRAY_VER="$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r .tag_name)" ARCH="$(dpkg --print-architecture)" case "$ARCH" in amd64) ARCH_TAG="linux-64";; arm64|aarch64) ARCH_TAG="linux-arm64";; armhf|armv7l) ARCH_TAG="linux-armv7";; ) ARCH_TAG="linux-64";; esac TMPDIR=$(mktemp -d) cd "$TMPDIR" curl -sL "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VER}/Xray-${XRAY_VER}-${ARCH_TAG}.zip" -o xray.zip || { msg "Release download failed, trying Xray official installer..." bash <(curl -sL https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh) || err "xray install failed" return } apt-get install -y unzip unzip xray.zip install -m 755 xray /usr/local/bin/xray mkdir -p /usr/local/share/xray cp geosite.dat geosite.dat. /usr/local/share/xray/ 2>/dev/null || true cp geoip.dat geoip.dat.* /usr/local/share/xray/ 2>/dev/null || true cd - >/dev/null rm -rf "$TMPDIR"

@@ -37,7 +37,6 @@ echo -e "${NC}"
 
 # Update system
 log_info "Updating system packages..."
-apt update && apt upgrade -y
 apt install -y curl wget sudo git unzip jq certbot python3-certbot-nginx bc
 
 # Get domain from user

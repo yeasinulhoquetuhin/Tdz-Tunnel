@@ -1,39 +1,177 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# ==================================================
-# Tdz Tunnel - Ultimate VPN Solution
-# Developer: Yeasinul Hoque Tuhin
-# Contact: tuhinbro.website
-# ==================================================
+Tdz Tunnel - Xray automatic installer & simple account manager
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-MAGENTA='\033[0;35m'
-NC='\033[0m'
+Developer: Yeasinul Hoque Tuhin
 
-# Log functions
-log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
-log_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+Usage: curl -sSL https://.../install_tdz_tunnel.sh | bash
 
-# Check root
-if [[ $EUID -ne 0 ]]; then
-    log_error "Root access required! Use: ${CYAN}sudo ./install.sh${NC}"
-    exit 1
-fi
+This script installs Xray (core), creates default config supporting VLESS, VMESS, TROJAN
 
-# Banner
-echo -e "${GREEN}"
-echo "=================================================="
-echo "            Tdz Tunnel Auto Installer"
-echo "           Developer: Yeasinul Hoque Tuhin"
-echo "=================================================="
-echo -e "${NC}"
+and installs a management CLI: /usr/local/bin/tdz
+
+NOTE: This is a template. Traffic-quota enforcement requires additional system integration
+
+(vnstat, xray stats API or nftables/tc). See notes at the end of the script.
+
+set -euo pipefail export DEBIAN_FRONTEND=noninteractive
+
+--------- Helper funcs ---------
+
+msg() { echo -e "[TDZ] $"; } err() { echo -e "[TDZ][ERR] $" >&2; exit 1; } require_root() { [ "$(id -u)" -eq 0 ] || err "Run as root"; }
+
+require_root
+
+--------- Variables (change if you like) ---------
+
+TDZ_DIR="/etc/tdz" XRAY_DIR="/etc/xray" XRAY_CONFIG="$XRAY_DIR/tdz_config.json" USERS_DB="$TDZ_DIR/users.json" TDZ_BIN="/usr/local/bin/tdz" DOMAIN="$(hostname -f 2>/dev/null || echo "$(curl -s ifconfig.me || echo "YOUR_DOMAIN")")" UUID_BIN="$(command -v uuidgen || true)"
+
+Ensure dirs
+
+mkdir -p "$TDZ_DIR" "$XRAY_DIR" /var/log/tdz || true
+
+--------- Install prerequisites ---------
+
+install_prereq(){ msg "Installing prerequisites (curl, jq, socat, lsof)..." apt-get update -y apt-get install -y curl wget gnupg2 apt-transport-https lsb-release ca-certificates curl jq socat lsof }
+
+--------- Install Xray core (official binary) ---------
+
+install_xray(){ msg "Installing Xray-core (latest)..." XRAY_VER="$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r .tag_name)" ARCH="$(dpkg --print-architecture)" case "$ARCH" in amd64) ARCH_TAG="linux-64";; arm64|aarch64) ARCH_TAG="linux-arm64";; armhf|armv7l) ARCH_TAG="linux-armv7";; ) ARCH_TAG="linux-64";; esac TMPDIR=$(mktemp -d) cd "$TMPDIR" curl -sL "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VER}/Xray-${XRAY_VER}-${ARCH_TAG}.zip" -o xray.zip || { msg "Release download failed, trying Xray official installer..." bash <(curl -sL https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh) || err "xray install failed" return } apt-get install -y unzip unzip xray.zip install -m 755 xray /usr/local/bin/xray mkdir -p /usr/local/share/xray cp geosite.dat geosite.dat. /usr/local/share/xray/ 2>/dev/null || true cp geoip.dat geoip.dat.* /usr/local/share/xray/ 2>/dev/null || true cd - >/dev/null rm -rf "$TMPDIR"
+
+systemd service
+
+cat >/etc/systemd/system/xray.service <<'EOF' [Unit] Description=Xray Service (tdz) After=network.target nss-lookup.target
+
+[Service] User=root ExecStart=/usr/local/bin/xray -config /etc/xray/tdz_config.json Restart=on-failure
+
+[Install] WantedBy=multi-user.target EOF systemctl daemon-reload }
+
+--------- Default Xray config (VLESS WS/TCP, VMess, Trojan) ---------
+
+generate_config(){ msg "Generating Xray configuration..." cat > "$XRAY_CONFIG" <<EOF { "log": {"access": "/var/log/tdz/access.log", "error": "/var/log/tdz/error.log", "loglevel": "warning"}, "inbounds": [ { "port": 443, "protocol": "vless", "settings": {"clients": []}, "streamSettings": {"network": "tcp", "security": "tls", "tlsSettings": {"alpn": ["h2","http/1.1"]}} }, { "port": 8443, "protocol": "vmess", "settings": {"clients": []}, "streamSettings": {"network": "ws", "wsSettings": {"path": "/tdz-ws"}} }, { "port": 2083, "protocol": "trojan", "settings": {"clients": []}, "streamSettings": {"network": "tcp"} } ], "outbounds": [ {"protocol": "freedom","settings": {}}, {"protocol": "blackhole","settings": {}, "tag": "blocked"} ], "policy": {"levels": {"0": {"uplinkOnly": 0, "downlinkOnly": 0}}}, "transport": {} } EOF
+
+default users DB
+
+if [ ! -f "$USERS_DB" ]; then echo '{"users":[]}' > "$USERS_DB" fi }
+
+--------- Management CLI that manipulates config & users DB ---------
+
+install_manager(){ msg "Installing management CLI at $TDZ_BIN" cat > "$TDZ_BIN" <<'TDZ' #!/usr/bin/env bash
+
+tdz - simple Xray account manager for Tdz Tunnel
+
+TDZ_DIR="/etc/tdz" XRAY_CFG="/etc/xray/tdz_config.json" USERS_DB="$TDZ_DIR/users.json"
+
+jq_cmd() { jq -r "$@"; } require_root(){ [ "$(id -u)" -eq 0 ] || { echo "Run as root"; exit 1; } } require_root
+
+usage(){ cat <<USAGE Usage: tdz <command> [args] Commands: add <name> [--id UUID] [--limit MB] [--expiry DAYS]    Add new account (prints links) delete <id_or_email>                                   Delete account list                                                   List accounts show <id_or_email>                                     Show account details genlinks <id_or_email>                                 Print client links help USAGE }
+
+rand_uuid(){ if command -v uuidgen >/dev/null 2>&1; then uuidgen; else cat /proc/sys/kernel/random/uuid; fi }
+
+add_user(){ NAME="$1"; shift ID=""; LIMIT=0; EXP=0 while [ "$#" -gt 0 ]; do case "$1" in --id) ID="$2"; shift 2;; --limit) LIMIT="$2"; shift 2;; --expiry) EXP="$2"; shift 2;; *) shift;; esac done [ -n "$ID" ] || ID=$(rand_uuid) CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ) USER=$(jq -n --arg id "$ID" --arg name "$NAME" --arg created "$CREATED" --argjson limit $LIMIT --argjson exp $EXP '{id:$id, name:$name, created:$created, limit:$limit, expiry_days:$exp, disabled:false}') tmp=$(mktemp) jq ".users += [$USER]" "$USERS_DB" > "$tmp" && mv "$tmp" "$USERS_DB"
+
+inject into xray config: add to each inbound clients list
+
+for proto in "vless" "vmess" "trojan"; do case $proto in vless) jq --arg id "$ID" --arg email "$NAME" '.inbounds[0].settings.clients += [{"id":$id, "email":$email}]' "$XRAY_CFG" > "$tmp" && mv "$tmp" "$XRAY_CFG" ;; vmess) # vmess client format: id, alterId not used in v4 jq --arg id "$ID" --arg email "$NAME" '.inbounds[1].settings.clients += [{"id":$id, "email":$email, "alterId":0}]' "$XRAY_CFG" > "$tmp" && mv "$tmp" "$XRAY_CFG" ;; trojan) jq --arg id "$ID" --arg email "$NAME" '.inbounds[2].settings.clients += [{"password":$id, "email":$email}]' "$XRAY_CFG" > "$tmp" && mv "$tmp" "$XRAY_CFG" ;; esac done
+
+systemctl restart xray || true echo "Added user: $NAME (id: $ID)" echo "Run: tdz genlinks $ID to get client config/links" }
+
+delete_user(){ KEY="$1" tmp=$(mktemp)
+
+remove from users DB
+
+jq --arg key "$KEY" '.users |= map(select(.id != $key and .name != $key))' "$USERS_DB" > "$tmp" && mv "$tmp" "$USERS_DB"
+
+remove from xray config clients
+
+jq --arg key "$KEY" ' .inbounds[0].settings.clients |= map(select(.id != $key and .email != $key)) | .inbounds[1].settings.clients |= map(select(.id != $key and .email != $key)) | .inbounds[2].settings.clients |= map(select(.password != $key and .email != $key))' "$XRAY_CFG" > "$tmp" && mv "$tmp" "$XRAY_CFG"
+
+systemctl restart xray || true echo "Deleted: $KEY" }
+
+list_users(){ jq -r '.users[] | "- id:\t" + .id + "\tname:\t" + .name + "\tcreated:\t" + .created + "\tlimit(MB):\t" + (.limit|tostring) + "\texpiry_days:\t" + (.expiry_days|tostring)' "$USERS_DB" }
+
+show_user(){ KEY="$1" jq -r --arg key "$KEY" '.users[] | select(.id==$key or .name==$key) | to_entries[] | "(.key): (.value)"' "$USERS_DB" }
+
+genlinks(){ KEY="$1"
+
+find user
+
+USER=$(jq -r --arg key "$KEY" '.users[] | select(.id==$key or .name==$key) | @base64' "$USERS_DB" | head -n1 || true) if [ -z "$USER" ]; then echo "User not found"; exit 1; fi _u() { echo "$1" | base64 -d | jq -r ".${2}"; } ID=$(_u "$USER" id) NAME=$(_u "$USER" name) DOMAIN=$(jq -r '. | "'"'${DOMAIN}'"' ' /etc/tdz/ 2>/dev/null || echo "$HOSTNAME")
+
+ports from config
+
+VLESS_PORT=$(jq -r '.inbounds[0].port' "$XRAY_CFG") VMESS_PORT=$(jq -r '.inbounds[1].port' "$XRAY_CFG") TROJAN_PORT=$(jq -r '.inbounds[2].port' "$XRAY_CFG")
+
+echo "=== Client links for $NAME ==="
+
+VLESS ws+tls
+
+VLESS_LINK="vless://${ID}@${DOMAIN}:${VLESS_PORT}?path=/tdz-ws&security=tls&type=ws#${NAME}-vless" echo "VLESS (WS+TLS): $VLESS_LINK"
+
+VMESS JSON -> base64
+
+VMESS_JSON=$(jq -n --arg id "$ID" --arg host "$DOMAIN" --arg path "/tdz-ws" '{v: "2", ps: "'"'${NAME}-vmess'"'", add: $host, port: '$VMESS_PORT', id: $id, aid: "0", net: "ws", type: "none", host: "", path: $path, tls: ""}') VMESS_B64=$(echo -n "$VMESS_JSON" | base64 -w0) echo "VMESS (base64): vmess://$VMESS_B64"
+
+TROJAN
+
+TROJAN_LINK="trojan://${ID}@${DOMAIN}:${TROJAN_PORT}#${NAME}-trojan" echo "TROJAN: $TROJAN_LINK" }
+
+Main dispatcher
+
+case "${1:-help}" in add) shift; add_user "$@" ;; delete) shift; delete_user "$1" ;; list) list_users ;; show) shift; show_user "$1" ;; genlinks) shift; genlinks "$1" ;; help|*) usage ;; esac TDZ chmod +x "$TDZ_BIN" }
+
+--------- Expiry cron (disables users after expiry_days) ---------
+
+install_expiry_cron(){ msg "Installing expiry checker cron (runs every 10 minutes)" cat >/etc/cron.d/tdz-expiry <<'CRON' */10 * * * * root /usr/local/bin/tdz-expiry-check >/var/log/tdz/expiry.log 2>&1 CRON
+
+cat > /usr/local/bin/tdz-expiry-check <<'CHECK' #!/usr/bin/env bash USERS_DB="/etc/tdz/users.json" XRAY_CFG="/etc/xray/tdz_config.json" [ -f "$USERS_DB" ] || exit 0 for u in $(jq -c '.users[]' "$USERS_DB"); do id=$(echo "$u" | jq -r '.id') name=$(echo "$u" | jq -r '.name') created=$(echo "$u" | jq -r '.created') expiry_days=$(echo "$u" | jq -r '.expiry_days') if [ "$expiry_days" -gt 0 ]; then created_epoch=$(date -d "$created" +%s) now_epoch=$(date -u +%s) expire_epoch=$((created_epoch + expiry_days*86400)) if [ $now_epoch -ge $expire_epoch ]; then # disable user: remove from config and mark in DB tmp=$(mktemp) jq --arg id "$id" '.users |= map(if .id==$id then .disabled=true else . end)' "$USERS_DB" > "$tmp" && mv "$tmp" "$USERS_DB" tmp2=$(mktemp) jq --arg key "$id" ' .inbounds[0].settings.clients |= map(select(.id != $key)) | .inbounds[1].settings.clients |= map(select(.id != $key)) | .inbounds[2].settings.clients |= map(select(.password != $key))' "$XRAY_CFG" > "$tmp2" && mv "$tmp2" "$XRAY_CFG" systemctl restart xray || true echo "Disabled expired user: $name ($id)" fi fi done CHECK chmod +x /usr/local/bin/tdz-expiry-check }
+
+--------- Final instructions and optional steps ---------
+
+post_install_notes(){ cat <<'NOTES'
+
+Tdz Tunnel 설치 শেষ হয়েছে!
+
+관리 명령어 (root로 실행): tdz add <name> [--id UUID] [--limit MB] [--expiry DAYS] tdz delete <id_or_email> tdz list tdz genlinks <id_or_email>
+
+Important notes / limitations:
+
+This installer provides a working Xray config and a simple management CLI.
+
+Traffic quota enforcement (bytes per user) is NOT fully implemented by default. To implement quotas you can: • Use Xray's stats API (enable and query per-user traffic) and disable accounts when quota exceeded (cron + jq). • Use system-level monitoring like vnstat or iptables accounting + cron to disable users when they exceed limit. • Use tc/nftables to shape per-IP bandwidth (requires mapping user -> IP).
+
+
+Security & TLS:
+
+This template assumes you'll provide TLS certificates (recommended: use certbot to obtain real certs for $DOMAIN) Example: apt-get install -y certbot && certbot certonly --standalone -d $DOMAIN Then update tdz_config.json tlsSettings to point to the cert and key files.
+
+
+Customization:
+
+Ports, paths, and protocols are controlled in /etc/xray/tdz_config.json
+
+Users are recorded in /etc/tdz/users.json
+
+
+If you want, I can extend the script to:
+
+Automatically obtain and renew Let's Encrypt certs
+
+Implement per-user traffic quotas using Xray's stats API
+
+Add a simple web panel (static) to list users and usage
+
+
+Enjoy — Developer: Yeasinul Hoque Tuhin
+
+NOTES }
+
+--------- Run installation steps ---------
+
+install_prereq install_xray generate_config install_manager install_expiry_cron systemctl enable --now xray || true post_install_notes
+
+exit 0
+
 
 # Update system
 log_info "Updating system packages..."

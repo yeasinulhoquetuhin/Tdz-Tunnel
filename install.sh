@@ -58,6 +58,637 @@ fi
 get_server_info() {
     IP=$(curl -s ifconfig.me)
     LOCATION=$(curl -s ipinfo.io/$IP | jq -r '.country + ", " + .city')
+    ISP=$(curl -s ipinfo.io/$IP | jq -r '.org' | cut -d' ' -f2-)
+    echo "$LOCATION" > /root/tdz-server-location.txt
+    echo "$ISP" > /root/tdz-server-isp.txt
+}
+
+get_server_info
+
+# Install Xray
+log_info "Installing Xray..."
+bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+
+# Generate SSL certificate
+log_info "Generating SSL certificate for ${CYAN}$DOMAIN${NC}"
+certbot certonly --standalone --agree-tos --non-interactive --email admin@$DOMAIN -d $DOMAIN
+
+# Generate UUIDs
+UUID_VLESS=$(cat /proc/sys/kernel/random/uuid)
+UUID_VMESS=$(cat /proc/sys/kernel/random/uuid)
+UUID_TROJAN=$(cat /proc/sys/kernel/random/uuid)
+
+# Create Xray config with ALL protocols and proper settings
+log_info "Creating Xray configuration..."
+cat > /usr/local/etc/xray/config.json << EOF
+{
+    "inbounds": [
+        {
+            "port": 443,
+            "protocol": "vless",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "$UUID_VLESS",
+                        "flow": "xtls-rprx-vision",
+                        "email": "vless-tls@$DOMAIN"
+                    }
+                ],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "tls",
+                "tlsSettings": {
+                    "certificates": [
+                        {
+                            "certificateFile": "/etc/letsencrypt/live/$DOMAIN/fullchain.pem",
+                            "keyFile": "/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+                        }
+                    ],
+                    "alpn": ["h2", "http/1.1"]
+                }
+            },
+            "sniffing": {
+                "enabled": true,
+                "destOverride": ["http", "tls"]
+            }
+        },
+        {
+            "port": 80,
+            "protocol": "vless",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "$UUID_VLESS",
+                        "email": "vless-ntls@$DOMAIN"
+                    }
+                ],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "ws",
+                "wsSettings": {
+                    "path": "/TuhinDroidZone",
+                    "headers": {
+                        "Host": "$DOMAIN"
+                    }
+                },
+                "security": "none"
+            },
+            "sniffing": {
+                "enabled": true,
+                "destOverride": ["http", "tls"]
+            }
+        },
+        {
+            "port": 8443,
+            "protocol": "vmess",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "$UUID_VMESS",
+                        "alterId": 0,
+                        "email": "vmess-tls@$DOMAIN"
+                    }
+                ]
+            },
+            "streamSettings": {
+                "network": "ws",
+                "wsSettings": {
+                    "path": "/TuhinDroidZone",
+                    "headers": {
+                        "Host": "$DOMAIN"
+                    }
+                },
+                "security": "tls",
+                "tlsSettings": {
+                    "certificates": [
+                        {
+                            "certificateFile": "/etc/letsencrypt/live/$DOMAIN/fullchain.pem",
+                            "keyFile": "/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "port": 8080,
+            "protocol": "vmess",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "$UUID_VMESS",
+                        "alterId": 0,
+                        "email": "vmess-ntls@$DOMAIN"
+                    }
+                ]
+            },
+            "streamSettings": {
+                "network": "ws",
+                "wsSettings": {
+                    "path": "/TuhinDroidZone",
+                    "headers": {
+                        "Host": "$DOMAIN"
+                    }
+                },
+                "security": "none"
+            }
+        },
+        {
+            "port": 2095,
+            "protocol": "trojan",
+            "settings": {
+                "clients": [
+                    {
+                        "password": "$UUID_TROJAN",
+                        "email": "trojan-tls@$DOMAIN"
+                    }
+                ]
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "tls",
+                "tlsSettings": {
+                    "certificates": [
+                        {
+                            "certificateFile": "/etc/letsencrypt/live/$DOMAIN/fullchain.pem",
+                            "keyFile": "/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "port": 2096,
+            "protocol": "trojan",
+            "settings": {
+                "clients": [
+                    {
+                        "password": "$UUID_TROJAN",
+                        "email": "trojan-grpc@$DOMAIN"
+                    }
+                ]
+            },
+            "streamSettings": {
+                "network": "grpc",
+                "grpcSettings": {
+                    "serviceName": "Tuhin-Internet-Service"
+                },
+                "security": "tls",
+                "tlsSettings": {
+                    "certificates": [
+                        {
+                            "certificateFile": "/etc/letsencrypt/live/$DOMAIN/fullchain.pem",
+                            "keyFile": "/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+                        }
+                    ]
+                }
+            }
+        }
+    ],
+    "outbounds": [
+        {
+            "protocol": "freedom",
+            "tag": "direct"
+        },
+        {
+            "protocol": "blackhole",
+            "tag": "blocked"
+        }
+    ]
+}
+EOF
+
+# Restart Xray
+systemctl restart xray
+systemctl enable xray
+
+# Configure firewall
+log_info "Configuring firewall..."
+ufw allow 80/tcp
+ufw allow 443/tcp
+ufw allow 8443/tcp
+ufw allow 8080/tcp
+ufw allow 2095/tcp
+ufw allow 2096/tcp
+ufw --force enable
+
+# Create user management system
+mkdir -p /etc/tdz
+cat > /etc/tdz/user-manager.sh << 'EOF'
+#!/bin/bash
+
+USER_DB="/etc/tdz/users.json"
+
+initialize_db() {
+    if [ ! -f "$USER_DB" ]; then
+        echo '{"users": []}' > "$USER_DB"
+    fi
+}
+
+create_user() {
+    local protocol=$1
+    local remark=$2
+    local expiry_days=$3
+    
+    case $protocol in
+        "vless")
+            uuid=$(cat /proc/sys/kernel/random/uuid)
+            expiry_date=$(date -d "+$expiry_days days" +"%d/%m/%Y")
+            jq ".users += [{\"protocol\": \"vless\", \"uuid\": \"$uuid\", \"remark\": \"$remark\", \"expiry_date\": \"$expiry_date\", \"created\": \"$(date)\"}]" "$USER_DB" > /tmp/tdz_temp.json && mv /tmp/tdz_temp.json "$USER_DB"
+            echo "$uuid"
+            ;;
+        "vmess")
+            uuid=$(cat /proc/sys/kernel/random/uuid)
+            expiry_date=$(date -d "+$expiry_days days" +"%d/%m/%Y")
+            jq ".users += [{\"protocol\": \"vmess\", \"uuid\": \"$uuid\", \"remark\": \"$remark\", \"expiry_date\": \"$expiry_date\", \"created\": \"$(date)\"}]" "$USER_DB" > /tmp/tdz_temp.json && mv /tmp/tdz_temp.json "$USER_DB"
+            echo "$uuid"
+            ;;
+        "trojan")
+            password=$(cat /proc/sys/kernel/random/uuid | cut -d'-' -f1)
+            expiry_date=$(date -d "+$expiry_days days" +"%d/%m/%Y")
+            jq ".users += [{\"protocol\": \"trojan\", \"password\": \"$password\", \"remark\": \"$remark\", \"expiry_date\": \"$expiry_date\", \"created\": \"$(date)\"}]" "$USER_DB" > /tmp/tdz_temp.json && mv /tmp/tdz_temp.json "$USER_DB"
+            echo "$password"
+            ;;
+    esac
+}
+
+list_users() {
+    jq -r '.users[] | "\(.protocol) - \(.remark) - Expiry: \(.expiry_date)"' "$USER_DB"
+}
+
+get_user_info() {
+    local protocol=$1
+    local remark=$2
+    jq -r ".users[] | select(.protocol == \"$protocol\" and .remark == \"$remark\")" "$USER_DB"
+}
+EOF
+
+chmod +x /etc/tdz/user-manager.sh
+
+# Create advanced control script with REAL configuration
+cat > /usr/local/bin/tdz << 'EOF'
+#!/bin/bash
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+NC='\033[0m'
+
+CONFIG_FILE="/root/tdz-config.txt"
+SERVER_LOCATION=$(cat /root/tdz-server-location.txt 2>/dev/null || echo "Singapore")
+SERVER_ISP=$(cat /root/tdz-server-isp.txt 2>/dev/null || echo "Digital Ocean")
+USER_DB="/etc/tdz/users.json"
+source /etc/tdz/user-manager.sh
+
+initialize_db
+
+show_vless_config() {
+    local remark=$1
+    local uuid=$2
+    local expiry_date=$3
+    
+    domain=$(grep "Domain:" "$CONFIG_FILE" | cut -d' ' -f2)
+    
+    clear
+    echo -e "${GREEN}"
+    echo "————————————————————————————————————"
+    echo "————————————————————————————————————"
+    echo "               VLESS ACCOUNT"
+    echo "————————————————————————————————————"
+    echo "————————————————————————————————————"
+    echo -e "${NC}"
+    echo -e "Remarks      : ${CYAN}$remark${NC}"
+    echo -e "Location     : ${YELLOW}$SERVER_LOCATION${NC}"
+    echo -e "ISP          : ${YELLOW}$SERVER_ISP${NC}"
+    echo -e "Domain       : ${GREEN}$domain${NC}"
+    echo -e "Port TLS     : ${BLUE}443${NC}"
+    echo -e "Port N-TLS   : ${BLUE}80${NC}"
+    echo -e "Uid          : ${MAGENTA}$uuid${NC}"
+    echo -e "Encryption   : ${CYAN}Auto${NC}"
+    echo -e "Security     : ${CYAN}Auto${NC}"
+    echo -e "Network      : ${YELLOW}Websocket/gRPC${NC}"
+    echo -e "Service Name : ${CYAN}Tuhin-Internet-Service${NC}"
+    echo -e "Path ws      : ${GREEN}/TuhinDroidZone${NC}"
+    echo -e "Expired On   : ${RED}$expiry_date${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "          VLESS gRPC TLS"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${CYAN}vless://$uuid@$domain:443?type=grpc&encryption=none&serviceName=Tuhin-Internet-Service&security=tls&sni=$domain&fp=chrome&alpn=h2,http/1.1#$remark${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "          VLESS WS NO TLS"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${CYAN}vless://$uuid@$domain:80?type=ws&encryption=none&path=/TuhinDroidZone&host=$domain&security=none#$remark${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+}
+
+show_vmess_config() {
+    local remark=$1
+    local uuid=$2
+    local expiry_date=$3
+    
+    domain=$(grep "Domain:" "$CONFIG_FILE" | cut -d' ' -f2)
+    
+    # Create VMESS configuration
+    vmess_config=$(cat << EOF
+{
+  "v": "2",
+  "ps": "$remark",
+  "add": "$domain",
+  "port": "8443",
+  "id": "$uuid",
+  "aid": "0",
+  "net": "ws",
+  "type": "none",
+  "host": "$domain",
+  "path": "/TuhinDroidZone",
+  "tls": "tls"
+}
+EOF
+    )
+    
+    vmess_config_ntls=$(cat << EOF
+{
+  "v": "2",
+  "ps": "$remark-NTLS",
+  "add": "$domain",
+  "port": "8080",
+  "id": "$uuid",
+  "aid": "0",
+  "net": "ws",
+  "type": "none",
+  "host": "$domain",
+  "path": "/TuhinDroidZone",
+  "tls": "none"
+}
+EOF
+    )
+    
+    clear
+    echo -e "${GREEN}"
+    echo "————————————————————————————————————"
+    echo "————————————————————————————————————"
+    echo "               VMESS ACCOUNT"
+    echo "————————————————————————————————————"
+    echo "————————————————————————————————————"
+    echo -e "${NC}"
+    echo -e "Remarks      : ${CYAN}$remark${NC}"
+    echo -e "Location     : ${YELLOW}$SERVER_LOCATION${NC}"
+    echo -e "ISP          : ${YELLOW}$SERVER_ISP${NC}"
+    echo -e "Domain       : ${GREEN}$domain${NC}"
+    echo -e "Port TLS     : ${BLUE}8443${NC}"
+    echo -e "Port N-TLS   : ${BLUE}8080${NC}"
+    echo -e "Uid          : ${MAGENTA}$uuid${NC}"
+    echo -e "Encryption   : ${CYAN}Auto${NC}"
+    echo -e "Security     : ${CYAN}Auto${NC}"
+    echo -e "Network      : ${YELLOW}Websocket${NC}"
+    echo -e "Path         : ${GREEN}/TuhinDroidZone${NC}"
+    echo -e "Expired On   : ${RED}$expiry_date${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "          VMESS WS TLS"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${CYAN}vmess://$(echo "$vmess_config" | base64 -w 0)${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "          VMESS WS NO TLS"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${CYAN}vmess://$(echo "$vmess_config_ntls" | base64 -w 0)${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+}
+
+show_trojan_config() {
+    local remark=$1
+    local password=$2
+    local expiry_date=$3
+    
+    domain=$(grep "Domain:" "$CONFIG_FILE" | cut -d' ' -f2)
+    
+    clear
+    echo -e "${GREEN}"
+    echo "————————————————————————————————————"
+    echo "————————————————————————————————————"
+    echo "               TROJAN ACCOUNT"
+    echo "————————————————————————————————————"
+    echo "————————————————————————————————————"
+    echo -e "${NC}"
+    echo -e "Remarks      : ${CYAN}$remark${NC}"
+    echo -e "Location     : ${YELLOW}$SERVER_LOCATION${NC}"
+    echo -e "ISP          : ${YELLOW}$SERVER_ISP${NC}"
+    echo -e "Domain       : ${GREEN}$domain${NC}"
+    echo -e "Port TCP     : ${BLUE}2095${NC}"
+    echo -e "Port gRPC    : ${BLUE}2096${NC}"
+    echo -e "Password     : ${MAGENTA}$password${NC}"
+    echo -e "Encryption   : ${CYAN}Auto${NC}"
+    echo -e "Security     : ${CYAN}TLS${NC}"
+    echo -e "Network      : ${YELLOW}TCP/gRPC${NC}"
+    echo -e "Service Name : ${CYAN}Tuhin-Internet-Service${NC}"
+    echo -e "Expired On   : ${RED}$expiry_date${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "          TROJAN TCP TLS"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${CYAN}trojan://$password@$domain:2095?security=tls&type=tcp&headerType=none&sni=$domain#$remark${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "          TROJAN gRPC TLS"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${CYAN}trojan://$password@$domain:2096?security=tls&type=grpc&serviceName=Tuhin-Internet-Service&sni=$domain#$remark${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+}
+
+create_user_menu() {
+    clear
+    echo -e "${GREEN}"
+    echo "=================================================="
+    echo "               Create New User"
+    echo "=================================================="
+    echo -e "${NC}"
+    echo "1. VLESS User"
+    echo "2. VMESS User"
+    echo "3. Trojan User"
+    echo "4. Back to Main Menu"
+    echo -e "${GREEN}==================================================${NC}"
+    read -p "Select protocol [1-4]: " proto_choice
+    
+    case $proto_choice in
+        1) protocol="vless" ;;
+        2) protocol="vmess" ;;
+        3) protocol="trojan" ;;
+        4) return ;;
+        *) echo "Invalid choice!"; sleep 1; create_user_menu; return ;;
+    esac
+    
+    read -p "Enter remark name: " remark
+    read -p "Enter expiry days: " expiry_days
+    
+    if [ "$protocol" = "vless" ] || [ "$protocol" = "vmess" ]; then
+        user_id=$(create_user "$protocol" "$remark" "$expiry_days")
+        expiry_date=$(date -d "+$expiry_days days" +"%d/%m/%Y")
+        
+        if [ "$protocol" = "vless" ]; then
+            show_vless_config "$remark" "$user_id" "$expiry_date"
+        else
+            show_vmess_config "$remark" "$user_id" "$expiry_date"
+        fi
+    else
+        password=$(create_user "$protocol" "$remark" "$expiry_days")
+        expiry_date=$(date -d "+$expiry_days days" +"%d/%m/%Y")
+        show_trojan_config "$remark" "$password" "$expiry_date"
+    fi
+    
+    read -p "Press Enter to continue..."
+}
+
+list_users_menu() {
+    clear
+    echo -e "${GREEN}"
+    echo "=================================================="
+    echo "               Current Users"
+    echo "=================================================="
+    echo -e "${NC}"
+    list_users
+    echo -e "${GREEN}==================================================${NC}"
+    read -p "Press Enter to continue..."
+}
+
+show_main_menu() {
+    while true; do
+        clear
+        echo -e "${GREEN}"
+        echo "=================================================="
+        echo "           Tdz Tunnel Control Panel"
+        echo "           Developer: Yeasinul Hoque Tuhin"
+        echo "=================================================="
+        echo -e "${NC}"
+        echo "1. Create New User"
+        echo "2. List All Users"
+        echo "3. Server Status"
+        echo "4. Restart Services"
+        echo "5. VPS Information"
+        echo "6. Uninstall Tdz Tunnel"
+        echo "0. Exit"
+        echo -e "${GREEN}==================================================${NC}"
+        read -p "Select an option [0-6]: " main_choice
+
+        case $main_choice in
+            1) create_user_menu ;;
+            2) list_users_menu ;;
+            3) systemctl status xray --no-pager -l; read -p "Press Enter to continue..." ;;
+            4) systemctl restart xray; echo "Services restarted!"; sleep 1 ;;
+            5) echo "VPS Info: $SERVER_LOCATION - $SERVER_ISP"; read -p "Press Enter to continue..." ;;
+            6) uninstall_tdz ;;
+            0) exit 0 ;;
+            *) echo "Invalid option!"; sleep 1 ;;
+        esac
+    done
+}
+
+uninstall_tdz() {
+    echo -e "${RED}"
+    read -p "Are you sure you want to uninstall? (y/n): " confirm
+    if [ "$confirm" = "y" ]; then
+        systemctl stop xray
+        systemctl disable xray
+        rm -rf /usr/local/bin/tdz
+        rm -rf /usr/local/etc/xray
+        rm -rf /etc/tdz
+        rm -f /root/tdz-config.txt
+        rm -f /root/tdz-server-location.txt
+        rm -f /root/tdz-server-isp.txt
+        echo "Tdz Tunnel uninstalled successfully!"
+    fi
+    echo -e "${NC}"
+    exit 0
+}
+
+# Start the menu
+if [ $# -eq 0 ]; then
+    show_main_menu
+else
+    case $1 in
+        "1") create_user_menu ;;
+        "2") list_users_menu ;;
+        "3") systemctl status xray --no-pager -l ;;
+        "4") systemctl restart xray ;;
+        "5") echo "VPS Info: $SERVER_LOCATION - $SERVER_ISP" ;;
+        "6") uninstall_tdz ;;
+        *) show_main_menu ;;
+    esac
+fi
+EOF
+
+chmod +x /usr/local/bin/tdz
+
+# Save config
+cat > /root/tdz-config.txt << EOF
+Domain: $DOMAIN
+VLESS UUID: $UUID_VLESS
+VMESS UUID: $UUID_VMESS
+Trojan Password: $UUID_TROJAN
+Installation Date: $(date)
+Server Location: $SERVER_LOCATION
+Server ISP: $SERVER_ISP
+WS Path: /TuhinDroidZone
+gRPC Service Name: Tuhin-Internet-Service
+EOF
+
+# Initialize user database
+mkdir -p /etc/tdz
+echo '{"users": []}' > /etc/tdz/users.json
+
+# Completion message
+log_success "Installation completed!"
+echo -e "${GREEN}"
+echo "=================================================="
+echo "           Tdz Tunnel Setup Complete!"
+echo "=================================================="
+echo -e "${NC}"
+echo "Control Panel: ${CYAN}tdz${NC}"
+echo "Create User: ${CYAN}tdz 1${NC}"
+echo "List Users: ${CYAN}tdz 2${NC}"
+echo ""
+echo "Config saved to: ${CYAN}/root/tdz-config.txt${NC}"
+echo "User database: ${CYAN}/etc/tdz/users.json${NC}"
+# Update system
+log_info "Updating system packages..."
+apt update && apt upgrade -y
+apt install -y curl wget sudo git unzip jq certbot python3-certbot-nginx bc
+
+# Get domain from user
+read -p "Enter your domain name: " DOMAIN
+if [ -z "$DOMAIN" ]; then
+    log_error "Domain name is required!"
+    exit 1
+fi
+
+# Verify domain
+log_info "Verifying domain: ${CYAN}$DOMAIN${NC}"
+if ! ping -c 1 $DOMAIN &> /dev/null; then
+    log_error "Domain not reachable! Please configure DNS first."
+    exit 1
+fi
+
+# Get server location and ISP info
+get_server_info() {
+    IP=$(curl -s ifconfig.me)
+    LOCATION=$(curl -s ipinfo.io/$IP | jq -r '.country + ", " + .city')
     ISP=$(curl -s ipinfo.io/$IP | jq -r '.org')
     echo "$LOCATION" > /root/tdz-server-location.txt
     echo "$ISP" > /root/tdz-server-isp.txt

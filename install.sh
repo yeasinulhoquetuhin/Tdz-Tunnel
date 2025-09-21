@@ -79,6 +79,469 @@ UUID_VMESS=$(cat /proc/sys/kernel/random/uuid)
 UUID_TROJAN=$(cat /proc/sys/kernel/random/uuid)
 CUSTOM_ID="TuhinDroidZone$(date +%m%d)"
 
+# Create Xray config with ALL protocols
+log_info "Creating Xray configuration..."
+cat > /usr/local/etc/xray/config.json << EOF
+{
+    "inbounds": [
+        {
+            "port": 443,
+            "protocol": "vless",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "$UUID_VLESS",
+                        "flow": "xtls-rprx-vision",
+                        "email": "vless-tls@$DOMAIN"
+                    }
+                ],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "tls",
+                "tlsSettings": {
+                    "certificates": [
+                        {
+                            "certificateFile": "/etc/letsencrypt/live/$DOMAIN/fullchain.pem",
+                            "keyFile": "/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+                        }
+                    ],
+                    "alpn": ["h2", "http/1.1"]
+                }
+            },
+            "sniffing": {
+                "enabled": true,
+                "destOverride": ["http", "tls"]
+            }
+        },
+        {
+            "port": 80,
+            "protocol": "vless",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "$UUID_VLESS",
+                        "email": "vless-ntls@$DOMAIN"
+                    }
+                ],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "ws",
+                "wsSettings": {
+                    "path": "/@TuhinBroh",
+                    "headers": {
+                        "Host": "$DOMAIN"
+                    }
+                },
+                "security": "none"
+            },
+            "sniffing": {
+                "enabled": true,
+                "destOverride": ["http", "tls"]
+            }
+        },
+        {
+            "port": 8443,
+            "protocol": "vmess",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "$UUID_VMESS",
+                        "alterId": 0,
+                        "email": "vmess-tls@$DOMAIN"
+                    }
+                ]
+            },
+            "streamSettings": {
+                "network": "ws",
+                "wsSettings": {
+                    "path": "/tdz-vmess",
+                    "headers": {
+                        "Host": "$DOMAIN"
+                    }
+                },
+                "security": "tls",
+                "tlsSettings": {
+                    "certificates": [
+                        {
+                            "certificateFile": "/etc/letsencrypt/live/$DOMAIN/fullchain.pem",
+                            "keyFile": "/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "port": 8080,
+            "protocol": "vmess",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "$UUID_VMESS",
+                        "alterId": 0,
+                        "email": "vmess-ntls@$DOMAIN"
+                    }
+                ]
+            },
+            "streamSettings": {
+                "network": "ws",
+                "wsSettings": {
+                    "path": "/tdz-vmess-ntls",
+                    "headers": {
+                        "Host": "$DOMAIN"
+                    }
+                },
+                "security": "none"
+            }
+        },
+        {
+            "port": 2083,
+            "protocol": "trojan",
+            "settings": {
+                "clients": [
+                    {
+                        "password": "$UUID_TROJAN",
+                        "email": "trojan-tls@$DOMAIN"
+                    }
+                ]
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "tls",
+                "tlsSettings": {
+                    "certificates": [
+                        {
+                            "certificateFile": "/etc/letsencrypt/live/$DOMAIN/fullchain.pem",
+                            "keyFile": "/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "port": 2087,
+            "protocol": "trojan",
+            "settings": {
+                "clients": [
+                    {
+                        "password": "$UUID_TROJAN",
+                        "email": "trojan-grpc@$DOMAIN"
+                    }
+                ]
+            },
+            "streamSettings": {
+                "network": "grpc",
+                "grpcSettings": {
+                    "serviceName": "Tuhin-Internet-Service"
+                },
+                "security": "tls",
+                "tlsSettings": {
+                    "certificates": [
+                        {
+                            "certificateFile": "/etc/letsencrypt/live/$DOMAIN/fullchain.pem",
+                            "keyFile": "/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+                        }
+                    ]
+                }
+            }
+        }
+    ],
+    "outbounds": [
+        {
+            "protocol": "freedom",
+            "tag": "direct"
+        },
+        {
+            "protocol": "blackhole",
+            "tag": "blocked"
+        }
+    ]
+}
+EOF
+
+# Restart Xray
+systemctl restart xray
+systemctl enable xray
+
+# Configure firewall
+log_info "Configuring firewall..."
+ufw allow 80/tcp
+ufw allow 443/tcp
+ufw allow 8443/tcp
+ufw allow 8080/tcp
+ufw allow 2083/tcp
+ufw allow 2087/tcp
+ufw --force enable
+
+# Create advanced control script
+cat > /usr/local/bin/tdz << 'EOF'
+#!/bin/bash
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+NC='\033[0m'
+
+CONFIG_FILE="/root/tdz-config.txt"
+SERVER_LOCATION=$(cat /root/tdz-server-location.txt 2>/dev/null || echo "Singapore")
+SERVER_ISP=$(cat /root/tdz-server-isp.txt 2>/dev/null || echo "Digital Ocean")
+
+show_vless_result() {
+    clear
+    echo -e "${GREEN}"
+    echo "————————————————————————————————————"
+    echo "————————————————————————————————————"
+    echo "               VLESS ACCOUNT"
+    echo "————————————————————————————————————"
+    echo "————————————————————————————————————"
+    echo -e "${NC}"
+    echo -e "Remarks      : ${CYAN}TUSFZ${NC}"
+    echo -e "Location     : ${YELLOW}$SERVER_LOCATION${NC}"
+    echo -e "ISP          : ${YELLOW}$SERVER_ISP${NC}"
+    echo -e "Domain       : ${GREEN}$(grep "Domain:" "$CONFIG_FILE" | cut -d' ' -f2)${NC}"
+    echo -e "Port TLS     : ${BLUE}443${NC}"
+    echo -e "Port N-TLS   : ${BLUE}80${NC}"
+    echo -e "Uid          : ${MAGENTA}$(grep "VLESS UUID:" "$CONFIG_FILE" | cut -d' ' -f4)${NC}"
+    echo -e "Encryption   : ${CYAN}Auto${NC}"
+    echo -e "Security     : ${CYAN}Auto${NC}"
+    echo -e "Network      : ${YELLOW}Websocket/gRPC${NC}"
+    echo -e "Service Name : ${CYAN}Tuhin - Internet Service${NC}"
+    echo -e "Path ws      : ${GREEN}/@TuhinBroh${NC}"
+    echo -e "Expired On   : ${RED}25/09/2025${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "          VLESS gRPC TLS"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${CYAN}vless://$(grep "VLESS UUID:" "$CONFIG_FILE" | cut -d' ' -f4)@$(grep "Domain:" "$CONFIG_FILE" | cut -d' ' -f2):443?type=grpc&encryption=none&serviceName=Tuhin-Internet-Service&security=tls&sni=$(grep "Domain:" "$CONFIG_FILE" | cut -d' ' -f2)&fp=chrome&alpn=h2,http/1.1#TUSFZ${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "          VLESS WS NO TLS"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${CYAN}vless://$(grep "VLESS UUID:" "$CONFIG_FILE" | cut -d' ' -f4)@$(grep "Domain:" "$CONFIG_FILE" | cut -d' ' -f2):80?type=ws&encryption=none&path=/@TuhinBroh&host=$(grep "Domain:" "$CONFIG_FILE" | cut -d' ' -f2)&security=none#TUSFZ${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+}
+
+show_vmess_result() {
+    clear
+    echo -e "${GREEN}"
+    echo "————————————————————————————————————"
+    echo "————————————————————————————————————"
+    echo "               VMESS ACCOUNT"
+    echo "————————————————————————————————————"
+    echo "————————————————————————————————————"
+    echo -e "${NC}"
+    echo -e "Remarks      : ${CYAN}TUSFZ-VMESS${NC}"
+    echo -e "Location     : ${YELLOW}$SERVER_LOCATION${NC}"
+    echo -e "ISP          : ${YELLOW}$SERVER_ISP${NC}"
+    echo -e "Domain       : ${GREEN}$(grep "Domain:" "$CONFIG_FILE" | cut -d' ' -f2)${NC}"
+    echo -e "Port TLS     : ${BLUE}8443${NC}"
+    echo -e "Port N-TLS   : ${BLUE}8080${NC}"
+    echo -e "Uid          : ${MAGENTA}$(grep "VMESS UUID:" "$CONFIG_FILE" | cut -d' ' -f4)${NC}"
+    echo -e "Encryption   : ${CYAN}Auto${NC}"
+    echo -e "Security     : ${CYAN}Auto${NC}"
+    echo -e "Network      : ${YELLOW}Websocket${NC}"
+    echo -e "Path TLS     : ${GREEN}/tdz-vmess${NC}"
+    echo -e "Path N-TLS   : ${GREEN}/tdz-vmess-ntls${NC}"
+    echo -e "Expired On   : ${RED}25/09/2025${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "          VMESS WS TLS"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${CYAN}vmess://ew0KICAidiI6ICIyIiwNCiAgInBzIjogIlRVU0ZaIiwNCiAgImFkZCI6ICIkKGRvbWFpbikiLA0KICAicG9ydCI6ICI4NDQzIiwNCiAgImlkIjogIiQodXVpZCkiLA0KICAiYWlkIjogIjAiLA0KICAibmV0IjogIndzIiwNCiAgInR5cGUiOiAibm9uZSIsDQogICJob3N0IjogIiQoZG9tYWluKSIsDQogICJwYXRoIjogIi90ZHotdm1lc3MiLA0KICAidGxzIjogInRscyINCn0=${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "          VMESS WS NO TLS"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${CYAN}vmess://ew0KICAidiI6ICIyIiwNCiAgInBzIjogIlRVU0ZaIiwNCiAgImFkZCI6ICIkKGRvbWFpbikiLA0KICAicG9ydCI6ICI4MDgwIiwNCiAgImlkIjogIiQodXVpZCkiLA0KICAiYWlkIjogIjAiLA0KICAibmV0IjogIndzIiwNCiAgInR5cGUiOiAibm9uZSIsDQogICJob3N0IjogIiQoZG9tYWluKSIsDQogICJwYXRoIjogIi90ZHotdm1lc3MtbnRscyIsDQogICJ0bHMiOiAibm9uZSINCn0=${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+}
+
+show_trojan_result() {
+    clear
+    echo -e "${GREEN}"
+    echo "————————————————————————————————————"
+    echo "————————————————————————————————————"
+    echo "               TROJAN ACCOUNT"
+    echo "————————————————————————————————————"
+    echo "————————————————————————————————————"
+    echo -e "${NC}"
+    echo -e "Remarks      : ${CYAN}TUSFZ-TROJAN${NC}"
+    echo -e "Location     : ${YELLOW}$SERVER_LOCATION${NC}"
+    echo -e "ISP          : ${YELLOW}$SERVER_ISP${NC}"
+    echo -e "Domain       : ${GREEN}$(grep "Domain:" "$CONFIG_FILE" | cut -d' ' -f2)${NC}"
+    echo -e "Port TCP     : ${BLUE}2083${NC}"
+    echo -e "Port gRPC    : ${BLUE}2087${NC}"
+    echo -e "Password     : ${MAGENTA}$(grep "Trojan Password:" "$CONFIG_FILE" | cut -d' ' -f4)${NC}"
+    echo -e "Encryption   : ${CYAN}Auto${NC}"
+    echo -e "Security     : ${CYAN}TLS${NC}"
+    echo -e "Network      : ${YELLOW}TCP/gRPC${NC}"
+    echo -e "Service Name : ${CYAN}Tuhin-Internet-Service${NC}"
+    echo -e "Expired On   : ${RED}25/09/2025${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "          TROJAN TCP TLS"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${CYAN}trojan://$(grep "Trojan Password:" "$CONFIG_FILE" | cut -d' ' -f4)@$(grep "Domain:" "$CONFIG_FILE" | cut -d' ' -f2):2083?security=tls&type=tcp&headerType=none&sni=$(grep "Domain:" "$CONFIG_FILE" | cut -d' ' -f2)#TUSFZ-TROJAN${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "          TROJAN gRPC TLS"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${CYAN}trojan://$(grep "Trojan Password:" "$CONFIG_FILE" | cut -d' ' -f4)@$(grep "Domain:" "$CONFIG_FILE" | cut -d' ' -f2):2087?security=tls&type=grpc&serviceName=Tuhin-Internet-Service&sni=$(grep "Domain:" "$CONFIG_FILE" | cut -d' ' -f2)#TUSFZ-TROJAN${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+    echo -e "${GREEN}————————————————————————————————————${NC}"
+}
+
+show_main_menu() {
+    clear
+    echo -e "${GREEN}"
+    echo "=================================================="
+    echo "           Tdz Tunnel Control Panel"
+    echo "           Developer: Yeasinul Hoque Tuhin"
+    echo "=================================================="
+    echo -e "${NC}"
+    echo "1. Show VLESS Config"
+    echo "2. Show VMESS Config" 
+    echo "3. Show Trojan Config"
+    echo "4. Server Status"
+    echo "5. Restart Services"
+    echo "6. VPS Information"
+    echo "7. Uninstall Tdz Tunnel"
+    echo "0. Exit"
+    echo -e "${GREEN}==================================================${NC}"
+    read -p "Select an option [0-7]: " main_choice
+
+    case $main_choice in
+        1) show_vless_result; read -p "Press Enter to continue..."; show_main_menu ;;
+        2) show_vmess_result; read -p "Press Enter to continue..."; show_main_menu ;;
+        3) show_trojan_result; read -p "Press Enter to continue..."; show_main_menu ;;
+        4) systemctl status xray --no-pager -l; read -p "Press Enter to continue..."; show_main_menu ;;
+        5) systemctl restart xray; echo "Services restarted!"; sleep 1; show_main_menu ;;
+        6) echo "VPS Info: $SERVER_LOCATION - $SERVER_ISP"; read -p "Press Enter to continue..."; show_main_menu ;;
+        7) uninstall_tdz ;;
+        0) exit 0 ;;
+        *) echo "Invalid option!"; sleep 1; show_main_menu ;;
+    esac
+}
+
+uninstall_tdz() {
+    echo -e "${RED}"
+    read -p "Are you sure you want to uninstall? (y/n): " confirm
+    if [ "$confirm" = "y" ]; then
+        systemctl stop xray
+        systemctl disable xray
+        rm -rf /usr/local/bin/tdz
+        rm -rf /usr/local/etc/xray
+        rm -f /root/tdz-config.txt
+        rm -f /root/tdz-server-location.txt
+        rm -f /root/tdz-server-isp.txt
+        echo "Tdz Tunnel uninstalled successfully!"
+    fi
+    echo -e "${NC}"
+    exit 0
+}
+
+# Start the menu
+if [ $# -eq 0 ]; then
+    show_main_menu
+else
+    case $1 in
+        "1") show_vless_result ;;
+        "2") show_vmess_result ;;
+        "3") show_trojan_result ;;
+        "4") systemctl status xray --no-pager -l ;;
+        "5") systemctl restart xray ;;
+        "6") echo "VPS Info: $SERVER_LOCATION - $SERVER_ISP" ;;
+        "7") uninstall_tdz ;;
+        *) show_main_menu ;;
+    esac
+fi
+EOF
+
+chmod +x /usr/local/bin/tdz
+
+# Save config
+cat > /root/tdz-config.txt << EOF
+Domain: $DOMAIN
+VLESS UUID: $UUID_VLESS
+VMESS UUID: $UUID_VMESS
+Trojan Password: $UUID_TROJAN
+Custom ID: $CUSTOM_ID
+Installation Date: $(date)
+Server Location: $SERVER_LOCATION
+Server ISP: $SERVER_ISP
+EOF
+
+# Completion message
+log_success "Installation completed!"
+echo -e "${GREEN}"
+echo "=================================================="
+echo "           Tdz Tunnel Setup Complete!"
+echo "=================================================="
+echo -e "${NC}"
+echo "Control Panel: ${CYAN}tdz${NC}"
+echo "Show VLESS: ${CYAN}tdz 1${NC}"
+echo "Show VMESS: ${CYAN}tdz 2${NC}"
+echo "Show Trojan: ${CYAN}tdz 3${NC}"
+echo ""
+echo "Config saved to: ${CYAN}/root/tdz-config.txt${NC}"
+# Update system
+log_info "Updating system packages..."
+apt update && apt upgrade -y
+apt install -y curl wget sudo git unzip jq certbot python3-certbot-nginx bc
+
+# Get domain from user
+read -p "Enter your domain name: " DOMAIN
+if [ -z "$DOMAIN" ]; then
+    log_error "Domain name is required!"
+    exit 1
+fi
+
+# Verify domain
+log_info "Verifying domain: ${CYAN}$DOMAIN${NC}"
+if ! ping -c 1 $DOMAIN &> /dev/null; then
+    log_error "Domain not reachable! Please configure DNS first."
+    exit 1
+fi
+
+# Get server location and ISP info
+get_server_info() {
+    IP=$(curl -s ifconfig.me)
+    LOCATION=$(curl -s ipinfo.io/$IP | jq -r '.country + ", " + .city')
+    ISP=$(curl -s ipinfo.io/$IP | jq -r '.org')
+    echo "$LOCATION" > /root/tdz-server-location.txt
+    echo "$ISP" > /root/tdz-server-isp.txt
+}
+
+get_server_info
+
+# Install Xray
+log_info "Installing Xray..."
+bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+
+# Generate SSL certificate
+log_info "Generating SSL certificate for ${CYAN}$DOMAIN${NC}"
+certbot certonly --standalone --agree-tos --non-interactive --email admin@$DOMAIN -d $DOMAIN
+
+# Generate UUIDs and custom IDs
+UUID_VLESS=$(cat /proc/sys/kernel/random/uuid)
+UUID_VMESS=$(cat /proc/sys/kernel/random/uuid)
+UUID_TROJAN=$(cat /proc/sys/kernel/random/uuid)
+CUSTOM_ID="TuhinDroidZone$(date +%m%d)"
+
 # Create Xray config with both TLS and NTLS
 log_info "Creating Xray configuration..."
 cat > /usr/local/etc/xray/config.json << EOF
